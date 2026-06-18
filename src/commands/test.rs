@@ -64,12 +64,7 @@ pub async fn run_all(args: &crate::cli::Args) -> anyhow::Result<()> {
         match &scenario.kind {
             TestKind::Search { query, engine } => {
                 rate_limiter.wait().await;
-                let engine_choice = match *engine {
-                    "google" => crate::server::tools::EngineChoice::Google,
-                    "bing" => crate::server::tools::EngineChoice::Bing,
-                    "duckduckgo" => crate::server::tools::EngineChoice::Duckduckgo,
-                    _ => crate::server::tools::EngineChoice::Auto,
-                };
+                let engine_choice = crate::server::tools::EngineChoice::from_str(engine);
                 let search_engine = crate::search::engine::select_engine(
                     &engine_choice,
                     browser_manager.mode(),
@@ -162,11 +157,7 @@ pub async fn run_search(
     let browser_manager = crate::browser::manager::BrowserManager::new(args).await?;
     let browser_manager = Arc::new(browser_manager);
 
-    let engine_choice = match engine {
-        "google" => crate::server::tools::EngineChoice::Google,
-        "bing" => crate::server::tools::EngineChoice::Bing,
-        _ => crate::server::tools::EngineChoice::Auto,
-    };
+    let engine_choice = crate::server::tools::EngineChoice::from_str(engine);
 
     let rate_limiter = crate::search::engine::RateLimiter::new(2000);
     rate_limiter.wait().await;

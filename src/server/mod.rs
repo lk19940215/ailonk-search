@@ -114,6 +114,7 @@ impl SearchServer {
         &self,
         Parameters(params): Parameters<tools::WebSearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let count = params.count.clamp(1, 20);
         let bm = self.browser().await?;
         let rl = self.rate_limiter(&bm).await;
         rl.wait().await;
@@ -133,7 +134,7 @@ impl SearchServer {
                 bm.mode(),
                 tab.page(),
                 &params.query,
-                params.count,
+                count,
                 self.region,
             )
             .await
@@ -160,7 +161,8 @@ impl SearchServer {
         Parameters(params): Parameters<tools::ReadPageParams>,
     ) -> Result<CallToolResult, ErrorData> {
         interaction::validate_url(&params.url, self.allow_private_urls).map_err(to_mcp_error)?;
-        let cache_key = ContentCache::key(&params.url, params.include_links, params.max_length);
+        let max_length = params.max_length.clamp(1, 15000);
+        let cache_key = ContentCache::key(&params.url, params.include_links, max_length);
         if let Some(cached) = self.cache.get(&cache_key).await {
             tracing::debug!(url = %params.url, "Cache hit");
             let text = format!(
@@ -201,7 +203,7 @@ impl SearchServer {
         }
 
         let extracted = crate::extract::content::ContentExtractor::extract(
-            &html, &params.url, params.max_length,
+            &html, &params.url, max_length,
         ).map_err(to_mcp_error)?;
 
         if extracted.is_low_quality() {
@@ -243,9 +245,10 @@ impl SearchServer {
             return Ok(CallToolResult::success(vec![Content::text("No URLs provided.")]));
         }
 
+        let max_length_per_page = params.max_length_per_page.clamp(1, 15000);
         let bm = self.browser().await?.clone();
         let effective_concurrency = params.concurrency
-            .max(1)
+            .clamp(1, 10)
             .min(bm.tab_pool().max_tabs())
             .min(urls.len());
 
@@ -257,7 +260,7 @@ impl SearchServer {
             let url = url.clone();
             let bm = bm.clone();
             let cache = self.cache.clone();
-            let max_length = params.max_length_per_page;
+            let max_len = max_length_per_page;
 
             handles.push(tokio::spawn(async move {
                 let _permit = match sem.acquire().await {
@@ -265,7 +268,7 @@ impl SearchServer {
                     Err(e) => return (url, Err(anyhow::anyhow!("Semaphore error: {e}"))),
                 };
 
-                let cache_key = ContentCache::key(&url, true, max_length);
+                let cache_key = ContentCache::key(&url, true, max_len);
                 if let Some(cached) = cache.get(&cache_key).await {
                     return (url, Ok(format!("# {}\n\n{}", cached.title, cached.content)));
                 }
@@ -294,7 +297,7 @@ impl SearchServer {
                         }
 
                         let extracted = crate::extract::content::ContentExtractor::extract(
-                            &html, &url, max_length,
+                            &html, &url, max_len,
                         )?;
 
                         if extracted.is_low_quality() {
@@ -369,6 +372,9 @@ impl SearchServer {
         &self,
         Parameters(params): Parameters<tools::SearchAndReadParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let search_count = params.search_count.clamp(1, 20);
+        let max_length_per_page = params.max_length_per_page.clamp(1, 15000);
+
         let bm = self.browser().await?;
         let rl = self.rate_limiter(&bm).await;
         rl.wait().await;
@@ -387,11 +393,17 @@ impl SearchServer {
                 bm.mode(),
                 tab.page(),
                 &params.query,
-                params.search_count,
+                search_count,
                 self.region,
             ).await
         }.await;
         tab.close().await;
+
+        let search_cdp_check: Result<(), ErrorData> = search_result
+            .as_ref()
+            .map(|_| ())
+            .map_err(|e| to_mcp_error(e.to_string()));
+        self.check_cdp_error(&search_cdp_check, &bm);
 
         if search_result.is_err() {
             rl.backoff().await;
@@ -401,8 +413,13 @@ impl SearchServer {
 
         let (engine_name, search_results) = search_result.map_err(to_mcp_error)?;
 
-        let read_count = params.read_count.min(5).min(search_results.len());
-        let urls_to_read: Vec<String> = search_results.iter().take(read_count).map(|r| r.url.clone()).collect();
+        let read_count = params.read_count.clamp(1, 5).min(search_results.len());
+        let urls_to_read: Vec<String> = search_results
+            .iter()
+            .take(read_count)
+            .filter(|r| interaction::validate_url(&r.url, self.allow_private_urls).is_ok())
+            .map(|r| r.url.clone())
+            .collect();
 
         let bm = bm.clone();
         let mut handles = vec![];
@@ -410,10 +427,10 @@ impl SearchServer {
             let url = url.clone();
             let bm = bm.clone();
             let cache = self.cache.clone();
-            let max_length = params.max_length_per_page;
+            let max_len = max_length_per_page;
 
             handles.push(tokio::spawn(async move {
-                let cache_key = ContentCache::key(&url, true, max_length);
+                let cache_key = ContentCache::key(&url, true, max_len);
                 if let Some(cached) = cache.get(&cache_key).await {
                     return (url, Ok::<String, anyhow::Error>(cached.content));
                 }
@@ -438,7 +455,7 @@ impl SearchServer {
                         let html = page_result?;
 
                         let extracted = crate::extract::content::ContentExtractor::extract(
-                            &html, &url, max_length,
+                            &html, &url, max_len,
                         )?;
 
                         if extracted.is_low_quality() {
@@ -467,14 +484,14 @@ impl SearchServer {
             }));
         }
 
-        let read_results = match tokio::time::timeout(
+        let (read_results, read_timed_out) = match tokio::time::timeout(
             std::time::Duration::from_secs(60),
             futures::future::join_all(&mut handles),
         ).await {
-            Ok(r) => r,
+            Ok(r) => (r, false),
             Err(_) => {
                 for h in &handles { h.abort(); }
-                vec![]
+                (vec![], true)
             }
         };
 
@@ -508,6 +525,10 @@ impl SearchServer {
             for (url, err) in &read_errors {
                 output.push_str(&format!("- {}: {}\n", url, err));
             }
+        }
+
+        if read_timed_out {
+            output.push_str("\n> ⚠️ Page reading timed out after 60s. Some results may be missing.\n");
         }
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -576,7 +597,7 @@ impl SearchServer {
         // Brief wait for process to fully exit and release file locks
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        let (synced, skipped) = crate::commands::sync::sync_login_files()
+        let (synced, skipped) = crate::browser::profile::sync_login_files()
             .map_err(to_mcp_error)?;
 
         let mut msg = format!(

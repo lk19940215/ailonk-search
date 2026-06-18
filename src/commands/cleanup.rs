@@ -1,7 +1,5 @@
 pub fn run() -> anyhow::Result<()> {
-    let profile_dir = dirs::home_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".ailonk-search-profile");
+    let profile_dir = crate::browser::profile::debug_profile_dir();
 
     if profile_dir.exists() {
         std::fs::remove_dir_all(&profile_dir)?;

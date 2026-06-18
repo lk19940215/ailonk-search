@@ -174,9 +174,7 @@ impl BrowserManager {
     }
 
     async fn launch_user_chrome(args: &crate::cli::Args) -> anyhow::Result<Self> {
-        let profile_dir = dirs::home_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(".ailonk-search-profile");
+        let profile_dir = super::profile::debug_profile_dir();
 
         if !profile_dir.exists() {
             tracing::warn!(

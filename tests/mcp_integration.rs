@@ -24,6 +24,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "batch_read",
     "search_and_read",
     "screenshot",
+    "sync_login",
 ];
 
 async fn spawn_client(extra_args: &[&str]) -> anyhow::Result<McpClient> {

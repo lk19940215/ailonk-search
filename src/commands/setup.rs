@@ -1,52 +1,14 @@
 use crate::browser::manager::find_chrome_path;
+use crate::browser::profile::{self, COPY_FILES};
 
-pub fn default_chrome_profile_dir() -> Option<std::path::PathBuf> {
-    let home = dirs::home_dir()?;
-    #[cfg(target_os = "macos")]
-    {
-        let p = home.join("Library/Application Support/Google/Chrome");
-        if p.exists() { return Some(p); }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let p = home.join(".config/google-chrome");
-        if p.exists() { return Some(p); }
-        let p = home.join(".config/chromium");
-        if p.exists() { return Some(p); }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(local) = dirs::data_local_dir() {
-            let p = local.join(r"Google\\Chrome\\User Data");
-            if p.exists() { return Some(p); }
-        }
-    }
-    None
-}
-
-pub fn setup_profile_dir() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".ailonk-search-profile")
+fn setup_profile_dir() -> std::path::PathBuf {
+    profile::debug_profile_dir()
 }
 
 /// Files safe to symlink (no SQLite locking issues).
 const SYMLINK_FILES: &[&str] = &[
     "Bookmarks", "Bookmarks.bak",
     "Preferences", "Secure Preferences",
-];
-
-/// SQLite databases — must be COPIED (symlink causes WAL lock conflicts
-/// between normal Chrome and debug Chrome).
-pub const COPY_FILES: &[&str] = &[
-    "Cookies", "Cookies-journal",
-    "Login Data", "Login Data-journal",
-    "Login Data For Account", "Login Data For Account-journal",
-    "Web Data", "Web Data-journal",
-    "History", "History-journal",
-    "Favicons", "Favicons-journal",
-    "Top Sites", "Top Sites-journal",
-    "Shortcuts", "Shortcuts-journal",
 ];
 
 /// Directories safe to symlink (read-only or regeneratable).
@@ -105,7 +67,7 @@ fn run_setup_profile(orig: &std::path::Path) -> anyhow::Result<std::path::PathBu
     }
 
     println!("\n书签/扩展通过 symlink 实时同步, Cookie/登录态通过复制保留。");
-    println!("如需更新登录态, 请重新运行 setup。");
+    println!("如需更新登录态, 请运行: ailonk-search sync");
     Ok(profile_dir)
 }
 
@@ -196,7 +158,7 @@ pub fn run(args: &crate::cli::Args) -> anyhow::Result<()> {
         println!("未检测到 Chrome 安装路径, 使用默认路径。");
     }
 
-    let orig = default_chrome_profile_dir()
+    let orig = profile::default_chrome_profile_dir()
         .ok_or_else(|| anyhow::anyhow!("未找到 Chrome 默认 profile 目录"))?;
     println!("Chrome 原始目录: {}", orig.display());
 

@@ -1,9 +1,13 @@
 [package]
 name = "ailonk-search"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.91"
 description = "Chrome CDP-based MCP Server for web search and content extraction"
+license = "MIT"
+repository = "https://github.com/lk19940215/ailonk-search"
+homepage = "https://github.com/lk19940215/ailonk-search"
+keywords = ["mcp", "chrome", "search", "cdp", "ai"]
 
 [dependencies]
 # --- MCP Server ---

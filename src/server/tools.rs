@@ -27,6 +27,17 @@ pub enum EngineChoice {
     Duckduckgo,
 }
 
+impl EngineChoice {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "google" => Self::Google,
+            "bing" => Self::Bing,
+            "duckduckgo" | "ddg" => Self::Duckduckgo,
+            _ => Self::Auto,
+        }
+    }
+}
+
 fn default_count() -> usize { 10 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

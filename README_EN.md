@@ -10,13 +10,15 @@
 
 ## Features
 
-- **5 MCP tools** — `web_search`, `read_page`, `batch_read`, `search_and_read` (recommended), and `screenshot`
+- **6 MCP tools** — `search_and_read` (recommended), `web_search`, `read_page`, `batch_read`, `screenshot`, `sync_login`
 - **Anti-bot stealth** — powered by [eoka](https://crates.io/crates/eoka): binary patching, human-like input, and consistent fingerprints
-- **Two connection modes** — **Headless** (zero-config server) and **UserChrome** (preserves login state, cookies, and extensions)
+- **Three connection modes** — **AutoConnect** ⭐ (Chrome 144+, uses main browser with all login state), **UserChrome** (dedicated debug profile), **Headless** (zero-config)
 - **ML content extraction** — [rs-trafilatura](https://crates.io/crates/rs-trafilatura) extracts main content across 7 page types (article, blog, news, product, forum, documentation, generic)
+- **Content quality gating** — CAPTCHA/login-wall detection + quality scoring; low-quality pages marked `[READ_FAILED]` and not cached
 - **Smart page loading** — detects SSR vs SPA pages and waits accordingly (DOM content check → network idle fallback)
 - **Tab pool + caching** — semaphore-limited concurrent tabs with [moka](https://crates.io/crates/moka) content cache (default TTL 300 s)
 - **Lazy Chrome init** — Chrome starts on the first tool call, not on `tools/list` (fast MCP handshake)
+- **Auto-reconnect** — detects CDP disconnection and automatically reconnects on next tool call
 - **Multi-engine search** — Google, Bing, DuckDuckGo with region-aware auto-selection (`cn` → cn.bing.com)
 - **Auto browser detection** — finds Google Chrome, Microsoft Edge, or Chromium on macOS, Linux, and Windows
 
@@ -24,7 +26,7 @@
 
 ## Quick Start
 
-### Install
+### 1. Install
 
 **Via npm (recommended, no Rust required):**
 
@@ -60,20 +62,20 @@ cargo install --path .
 
 ### 2. Choose a Mode
 
-> **Important:** Without running `setup`, the tool automatically falls back to Headless mode (no visible browser window).
+| Mode | Best for | Setup | Login state |
+|------|----------|-------|-------------|
+| **AutoConnect** ⭐ | Need login state (recommended, Chrome 144+) | Enable one toggle in Chrome | All main Chrome logins available instantly |
+| **UserChrome** | Need login state, but don't want to modify main Chrome | Run `setup` | Manual login or `sync` |
+| **Headless** (default fallback) | Servers, CI, quick trial | Zero-config | None |
 
-| Mode | Best for | Requires setup? |
-|------|----------|----------------|
-| **Headless** (default fallback) | Servers, CI, quick trial, zero-config | No |
-| **UserChrome** | Sites requiring login (GitHub, paywalled content) | **Yes — run `setup` first** |
+**AutoConnect mode** (recommended, all login state available instantly):
 
-**Headless mode** (zero-config, skip to step 3):
+1. Open `chrome://inspect/#remote-debugging` in Chrome and enable "Enable remote debugging" (one-time)
+2. Done! ailonk-search will auto-connect to your main Chrome
 
-```bash
-# Nothing to do — Headless works out of the box
-```
+> Chrome will show a permission dialog on first connection — click "Allow".
 
-**UserChrome mode** (preserves login state, cookies, extensions):
+**UserChrome mode** (dedicated debug profile):
 
 ```bash
 # npm users:
@@ -83,7 +85,13 @@ npx ailonk-search setup
 ailonk-search setup
 ```
 
-`setup` creates a dedicated debug Chrome profile on port 19222. It won't affect your normal browser. After setup, log in to the sites you need in that Chrome window — the login state will be used for future searches.
+`setup` creates a dedicated debug Chrome profile on port 19222. It won't affect your normal browser. When login state expires, run `ailonk-search sync` or use the MCP tool `sync_login` to refresh.
+
+**Headless mode** (zero-config, skip to step 3):
+
+```bash
+# Nothing to do — Headless works out of the box
+```
 
 ### 3. Configure MCP
 
@@ -104,7 +112,7 @@ Edit `~/.cursor/mcp.json` (or project `.cursor/mcp.json`):
 }
 ```
 
-> This auto-detects: has Profile → UserChrome mode, no Profile → Headless mode.
+> This auto-detects: AutoConnect → UserChrome → Headless fallback.
 > To force Headless: `"args": ["-y", "ailonk-search", "--headless"]`
 
 #### Claude Code
@@ -152,13 +160,14 @@ Edit `~/.claude/settings.json` or project `.mcp.json`:
 
 | Tool | Description | Key parameters |
 |------|-------------|----------------|
-| `search_and_read` | **Recommended.** Search the web and read top results in one call. | `query`, `engine` (auto/google/bing/duckduckgo), `search_count` (1–20, default 10), `read_count` (1–5, default 3), `max_length_per_page` (default 5000) |
+| `search_and_read` | **Recommended.** Search and read top results in one call. | `query`, `engine` (auto/google/bing/duckduckgo), `search_count` (1–20, default 10), `read_count` (1–5, default 3), `max_length_per_page` (default 5000) |
 | `web_search` | Search only — returns titles, URLs, and snippets. | `query`, `engine`, `count` (1–20, default 10) |
 | `read_page` | Fetch a single URL and extract clean Markdown. | `url`, `include_links` (default true), `max_length` (default 15000) |
 | `batch_read` | Read up to 10 URLs concurrently. | `urls`, `max_length_per_page` (default 5000), `concurrency` (default 5, max 10) |
 | `screenshot` | Capture a page as PNG/JPEG (base64 or file). Prefer `read_page` for text. | `url`, `format` (png/jpeg), `file_path` (optional) |
+| `sync_login` | Sync login state from main Chrome to debug profile. Use when `read_page` returns `[READ_FAILED]` on auth-required pages. | No parameters |
 
-**Recommended workflow:** start with `search_and_read` → use `read_page` for specific URLs → use `web_search` when you only need result lists.
+**Recommended workflow:** `search_and_read` → `read_page` (specific URLs) → `web_search` (only need result lists)
 
 ---
 
@@ -168,11 +177,11 @@ Global CLI flags (apply to all subcommands):
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--remote-url` | — | Connect to an existing Chrome CDP endpoint (e.g. `http://127.0.0.1:19222`) |
-| `--headless` | false | Force headless Chrome (skip auto-connect to UserChrome) |
+| `--remote-url` | — | Connect to an existing Chrome CDP endpoint |
+| `--headless` | false | Force headless Chrome |
 | `--chrome-path` | auto-detect | Path to Chrome/Edge/Chromium executable |
-| `--engine` | `auto` | Default search engine: `auto`, `google`, or `bing` |
-| `--region` | `auto` | Search region: `auto` (detect locale), `cn`, or `global` |
+| `--engine` | `auto` | Default search engine: `auto`, `google`, `bing` |
+| `--region` | `auto` | Search region: `auto` (detect locale), `cn`, `global` |
 | `--max-tabs` | `5` | Maximum concurrent browser tabs |
 | `--chrome-args` | — | Extra Chrome launch args (comma-separated) |
 | `--cache-ttl` | `300` | Content cache TTL in seconds (`0` to disable) |
@@ -184,7 +193,8 @@ Global CLI flags (apply to all subcommands):
 |---------|-------------|
 | `ailonk-search` / `serve` | Run as MCP server (default) |
 | `setup` | One-time UserChrome profile setup |
-| `cleanup` | Remove debug profile symlink and print recovery steps |
+| `sync` | Sync login state (Cookies + localStorage + sessionStorage) from main Chrome |
+| `cleanup` | Remove debug profile and print recovery steps |
 | `test-all` | Run all test scenarios with a structured report |
 | `test-search` | Dev: test search directly (no MCP) |
 | `test-read` | Dev: test page reading directly |
@@ -194,27 +204,45 @@ Global CLI flags (apply to all subcommands):
 
 ## Modes
 
-### Headless
+### AutoConnect ⭐ (Chrome 144+)
 
-- Launched automatically when `--headless` is set, no setup profile exists, or UserChrome connection fails
-- Uses eoka stealth: binary patching, human mouse/typing simulation
-- Best for: servers, CI, headless environments, zero-config usage
-- Default engine: **Bing** (more reliable against bot detection in headless mode)
-- Rate limit: 5 s between search requests
-
-### UserChrome
-
-- Connects to (or launches) a real Chrome instance with your profile at `~/.ailonk-search-profile`
-- Preserves login state, cookies, and extensions via the `setup` command
-- Runs on debug port **19222** — can coexist with your normal Chrome session
-- Best for: authenticated sites, CAPTCHA-prone pages, Google search in non-CN regions
+- Auto-detects Chrome's `DevToolsActivePort` and connects via WebSocket
+- **All login state available instantly** — no sync, no separate profile
+- One-time setup: enable `chrome://inspect/#remote-debugging` in Chrome
+- Chrome shows a permission dialog on first connection (click "Allow")
 - Default engine: **Google** (global) or **Bing cn** (China)
 - Rate limit: 2 s between search requests
 
+### UserChrome
+
+- Connects to (or launches) a real Chrome instance with profile at `~/.ailonk-search-profile`
+- Sync login state via `sync` command or MCP `sync_login` tool
+- Runs on debug port **19222** — coexists with normal Chrome
+- Default engine: **Google** (global) or **Bing cn** (China)
+- Rate limit: 2 s between search requests
+
+### Headless
+
+- Activated when `--headless` is set, or no UserChrome profile exists, or AutoConnect unavailable
+- Uses eoka stealth: binary patching, human mouse/typing simulation
+- Best for: servers, CI, headless environments, zero-config usage
+- Default engine: **Bing** (more reliable in headless mode)
+- Rate limit: 5 s between search requests
+
+### Connection Priority
+
+ailonk-search tries connections in this order:
+
+1. `--remote-url` (explicit)
+2. `DevToolsActivePort` (AutoConnect, Chrome 144+)
+3. Port 19222 (UserChrome, created by `setup`)
+4. Auto-launch Chrome (UserChrome or Headless fallback)
+
 | Scenario | Recommended mode |
 |----------|-----------------|
-| Quick setup, server/CI | Headless (`--headless`) |
-| Logged-in sites (GitHub, docs behind auth) | UserChrome (`setup` + default args) |
+| Sites requiring login | **AutoConnect** (enable `chrome://inspect`) |
+| Don't want to modify main Chrome | UserChrome (run `setup` first) |
+| Server / CI / quick trial | Headless (`--headless`) |
 | China mainland search | UserChrome or `--region cn` |
 | Connect to existing Chrome | `--remote-url http://127.0.0.1:9222` |
 
@@ -232,9 +260,9 @@ cargo build --release
 ### Run locally (stdio MCP)
 
 ```bash
-cargo run -- --headless          # headless mode
-cargo run --                     # UserChrome (requires setup)
-RUST_LOG=ailonk_search=debug cargo run -- --headless
+cargo run -- --headless                    # Headless mode
+cargo run --                               # UserChrome mode (requires setup)
+RUST_LOG=ailonk_search=debug cargo run -- --headless  # Debug logs
 ```
 
 ### Test
@@ -258,11 +286,11 @@ cargo run -- test-all
 ```
 src/
 ├── server/       # MCP tool definitions and handlers
-├── browser/      # Chrome CDP manager, tab pool, navigation
+├── browser/      # Chrome CDP manager, tab pool, page interaction
 ├── search/       # Google, Bing, DuckDuckGo engines
 ├── extract/      # rs-trafilatura content extraction
-├── cache/        # moka content cache
-└── commands/     # CLI subcommands (serve, setup, test)
+├── cache.rs      # moka content cache
+└── commands/     # CLI subcommands (serve, setup, sync, cleanup, test)
 ```
 
 ---
