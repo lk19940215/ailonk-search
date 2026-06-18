@@ -1,6 +1,6 @@
 {
   "name": "ailonk-search",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MCP server using real Chrome for web search & Markdown extraction",
   "license": "MIT",
   "repository": {
