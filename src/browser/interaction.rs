@@ -21,24 +21,21 @@ pub fn validate_file_path(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Navigate to URL and wait for page to be ready for content extraction.
+///
+/// Strategy: goto → wait for body (DOM loaded) → attempt brief network idle.
+/// Network idle has a hard cap to avoid hanging on pages with persistent
+/// connections (analytics, ads, websockets).
 pub async fn navigate(page: &Page, url: &str, timeout_secs: u64) -> anyhow::Result<()> {
     page.goto(url).await
         .map_err(|e| anyhow::anyhow!("Navigation failed for {}: {}", url, e))?;
 
     page.wait_for("body", timeout_secs * 1000).await.ok();
 
-    // Try common content container selectors for better readiness detection
-    for sel in &["article", "main", "[role='main']", ".content", "#content"] {
-        if page.wait_for(sel, 2000).await.is_ok() {
-            break;
-        }
-    }
-
-    let idle_timeout = (timeout_secs * 1000).min(6000);
-    match page.wait_for_network_idle(500, idle_timeout).await {
+    match page.wait_for_network_idle(500, 6000).await {
         Ok(_) => {}
         Err(_) => {
-            tracing::debug!(url, "Network not fully idle, proceeding with DOM-ready content");
+            tracing::debug!(url, "Network not fully idle after 6s, proceeding with current DOM");
         }
     }
     Ok(())
