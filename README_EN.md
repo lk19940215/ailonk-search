@@ -58,19 +58,36 @@ cd ailonk-search
 cargo install --path .
 ```
 
-### One-time setup (UserChrome mode, recommended)
+### 2. Choose a Mode
 
-For pages that require login (GitHub, paywalled sites, etc.), set up a debug Chrome profile:
+> **Important:** Without running `setup`, the tool automatically falls back to Headless mode (no visible browser window).
+
+| Mode | Best for | Requires setup? |
+|------|----------|----------------|
+| **Headless** (default fallback) | Servers, CI, quick trial, zero-config | No |
+| **UserChrome** | Sites requiring login (GitHub, paywalled content) | **Yes — run `setup` first** |
+
+**Headless mode** (zero-config, skip to step 3):
 
 ```bash
+# Nothing to do — Headless works out of the box
+```
+
+**UserChrome mode** (preserves login state, cookies, extensions):
+
+```bash
+# npm users:
+npx ailonk-search setup
+
+# GitHub Releases / source build users:
 ailonk-search setup
 ```
 
-Follow the printed instructions to launch Chrome with remote debugging on port `19222`. Bookmarks and extensions sync via symlink; cookies and login state are copied from your main profile.
+`setup` creates a dedicated debug Chrome profile on port 19222. It won't affect your normal browser. After setup, log in to the sites you need in that Chrome window — the login state will be used for future searches.
 
-### MCP configuration
+### 3. Configure MCP
 
-Add `ailonk-search` to your MCP client config. The server speaks stdio MCP — no HTTP port needed.
+Add `ailonk-search` to your AI tool's MCP config. The server speaks stdio MCP — no HTTP port needed.
 
 #### Cursor
 
@@ -86,6 +103,9 @@ Edit `~/.cursor/mcp.json` (or project `.cursor/mcp.json`):
   }
 }
 ```
+
+> This auto-detects: has Profile → UserChrome mode, no Profile → Headless mode.
+> To force Headless: `"args": ["-y", "ailonk-search", "--headless"]`
 
 #### Claude Code
 
@@ -113,22 +133,17 @@ Edit `~/.claude/settings.json` or project `.mcp.json`:
 }
 ```
 
-**Headless mode (no setup, for servers/CI):**
+**Other configuration examples:**
 
 ```json
+// Force Headless mode
 "args": ["-y", "ailonk-search", "--headless"]
-```
 
-**UserChrome mode (with login state, after `ailonk-search setup`):**
-
-```json
-"args": ["-y", "ailonk-search"]
-```
-
-**Custom Chrome path or region:**
-
-```json
+// Custom Chrome path + China region
 "args": ["-y", "ailonk-search", "--chrome-path", "/path/to/chrome", "--region", "cn"]
+
+// Allow accessing private/internal URLs
+"args": ["-y", "ailonk-search", "--allow-private-urls"]
 ```
 
 ---

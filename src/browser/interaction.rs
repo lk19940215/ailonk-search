@@ -86,22 +86,18 @@ pub async fn navigate(page: &Page, url: &str, timeout_secs: u64) -> anyhow::Resu
 
     page.wait_for("body", timeout_secs * 1000).await.ok();
 
-    // If body already has content (SSR/static page), a brief settle is enough.
-    // For SPAs that render via JS + API calls, fall through to network idle.
     let has_content: bool = page
         .evaluate("(document.body.innerText || '').length > 200")
         .await
         .unwrap_or(false);
 
-    if has_content {
-        page.wait(300).await;
-        return Ok(());
-    }
-
-    match page.wait_for_network_idle(500, 6000).await {
+    // Always wait for network idle — SPAs (e.g. TAPD) may have nav/sidebar text > 200
+    // but still be loading main content via API. Use shorter timeout when content exists.
+    let idle_timeout = if has_content { 3000 } else { 6000 };
+    match page.wait_for_network_idle(500, idle_timeout).await {
         Ok(_) => {}
         Err(_) => {
-            tracing::debug!(url, "Network not fully idle after 6s, proceeding with current DOM");
+            tracing::debug!(url, "Network not fully idle, proceeding with current DOM");
         }
     }
     Ok(())
@@ -145,13 +141,24 @@ const CAPTCHA_KEYWORDS: &[&str] = &[
     "captcha",
     "one last step",
     "verify you are human",
+    "access denied",
+    "security check",
     "最后一步",
     "请解决",
     "人机验证",
     "异常流量",
+    "百度安全验证",
+    "安全验证",
+    "请完成验证",
+    "请完成下方验证",
+    "网络不给力",
+    "访问异常",
 ];
 
-const CAPTCHA_URL_SIGNALS: &[&str] = &["/sorry/", "captcha", "challenge"];
+const CAPTCHA_URL_SIGNALS: &[&str] = &[
+    "/sorry/", "captcha", "challenge",
+    "wappass.baidu.com", "/passport/", "/verify/",
+];
 
 pub fn detect_captcha(title: &str, url: &str) -> bool {
     let t = title.to_lowercase();

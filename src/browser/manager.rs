@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use eoka::{Browser, StealthConfig};
+use tokio::sync::RwLock;
 
 use super::pool::TabPool;
 
@@ -7,29 +8,52 @@ const DEBUG_PORT: u16 = 19222;
 
 pub struct LazyBrowserManager {
     args: crate::cli::Args,
-    inner: tokio::sync::OnceCell<Arc<BrowserManager>>,
+    inner: RwLock<Option<Arc<BrowserManager>>>,
 }
 
 impl LazyBrowserManager {
     pub fn new(args: &crate::cli::Args) -> Arc<Self> {
         Arc::new(Self {
             args: args.clone(),
-            inner: tokio::sync::OnceCell::new(),
+            inner: RwLock::new(None),
         })
     }
 
-    pub async fn get(&self) -> anyhow::Result<&Arc<BrowserManager>> {
-        self.inner
-            .get_or_try_init(|| async {
-                tracing::info!("First tool call — initializing Chrome...");
-                let bm = BrowserManager::new(&self.args).await?;
-                Ok(Arc::new(bm))
-            })
-            .await
+    pub async fn get(&self) -> anyhow::Result<Arc<BrowserManager>> {
+        {
+            let guard = self.inner.read().await;
+            if let Some(bm) = guard.as_ref() {
+                if bm.is_healthy() {
+                    return Ok(bm.clone());
+                }
+                tracing::warn!("Chrome connection unhealthy, will reconnect...");
+            }
+        }
+
+        let mut guard = self.inner.write().await;
+
+        if let Some(bm) = guard.as_ref() {
+            if bm.is_healthy() {
+                return Ok(bm.clone());
+            }
+        }
+
+        if let Some(old_bm) = guard.take() {
+            tracing::info!("Shutting down unhealthy Chrome instance...");
+            old_bm.shutdown().await;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        tracing::info!("Initializing Chrome...");
+        let bm = BrowserManager::new(&self.args).await?;
+        let bm = Arc::new(bm);
+        *guard = Some(bm.clone());
+        Ok(bm)
     }
 
     pub async fn shutdown(&self) {
-        if let Some(bm) = self.inner.get() {
+        let mut guard = self.inner.write().await;
+        if let Some(bm) = guard.take() {
             bm.shutdown().await;
         }
     }
@@ -46,6 +70,7 @@ pub struct BrowserManager {
     mode: ConnectionMode,
     tab_pool: TabPool,
     chrome_child: std::sync::Mutex<Option<std::process::Child>>,
+    healthy: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl BrowserManager {
@@ -169,9 +194,39 @@ impl BrowserManager {
         chrome_child: Option<std::process::Child>,
     ) -> Self {
         let browser = Arc::new(browser);
-        let tab_pool = TabPool::new(browser.clone(), max_tabs);
+        let healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let tab_pool = TabPool::new(browser.clone(), max_tabs, healthy.clone());
         tracing::info!("Tab pool ready (max {} tabs)", max_tabs);
-        Self { browser, mode, tab_pool, chrome_child: std::sync::Mutex::new(chrome_child) }
+        Self { browser, mode, tab_pool, chrome_child: std::sync::Mutex::new(chrome_child), healthy }
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        if !self.healthy.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+
+        let mut guard = self.chrome_child.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(child) = guard.as_mut() {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    tracing::warn!("Chrome process exited: {}", status);
+                    self.healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+                    return false;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to check Chrome process: {}", e);
+                    self.healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    pub fn mark_unhealthy(&self) {
+        self.healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+        tracing::warn!("Browser marked as unhealthy — will reconnect on next call");
     }
 
     pub fn mode(&self) -> &ConnectionMode {
@@ -183,7 +238,11 @@ impl BrowserManager {
     }
 
     pub async fn shutdown(&self) {
-        if let Some(mut child) = self.chrome_child.lock().unwrap().take() {
+        if let Some(mut child) = self.chrome_child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             let _ = child.kill();
             let _ = child.wait();
             tracing::info!("Chrome process terminated");

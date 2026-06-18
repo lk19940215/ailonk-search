@@ -45,8 +45,52 @@ impl SearchServer {
         }
     }
 
-    async fn browser(&self) -> Result<&Arc<BrowserManager>, ErrorData> {
+    async fn browser(&self) -> Result<Arc<BrowserManager>, ErrorData> {
         self.browser.get().await.map_err(to_mcp_error)
+    }
+
+    /// Kill the debug Chrome process on port 19222 so cookie files can be safely overwritten.
+    async fn kill_debug_chrome(&self) {
+        #[cfg(unix)]
+        {
+            let output = tokio::process::Command::new("lsof")
+                .args(["-ti", ":19222"])
+                .output()
+                .await;
+            if let Ok(out) = output {
+                let pids = String::from_utf8_lossy(&out.stdout);
+                for pid_str in pids.lines() {
+                    let pid = pid_str.trim();
+                    if !pid.is_empty() {
+                        let _ = tokio::process::Command::new("kill")
+                            .args(["-TERM", pid])
+                            .output()
+                            .await;
+                        tracing::info!(pid, "Sent SIGTERM to debug Chrome");
+                    }
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = tokio::process::Command::new("taskkill")
+                .args(["/F", "/FI", "WINDOWTITLE eq *--remote-debugging-port=19222*"])
+                .output()
+                .await;
+        }
+    }
+
+    fn check_cdp_error<T>(&self, result: &Result<T, ErrorData>, bm: &BrowserManager) {
+        if let Err(e) = result {
+            let msg = &e.message;
+            if msg.contains("CDP reader")
+                || msg.contains("WebSocket")
+                || msg.contains("Transport error")
+                || msg.contains("connection is dead")
+            {
+                bm.mark_unhealthy();
+            }
+        }
     }
 
     async fn rate_limiter(&self, bm: &BrowserManager) -> &Arc<RateLimiter> {
@@ -71,7 +115,7 @@ impl SearchServer {
         Parameters(params): Parameters<tools::WebSearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let bm = self.browser().await?;
-        let rl = self.rate_limiter(bm).await;
+        let rl = self.rate_limiter(&bm).await;
         rl.wait().await;
 
         let engine = select_engine(
@@ -98,6 +142,7 @@ impl SearchServer {
         .await;
 
         tab.close().await;
+        self.check_cdp_error(&result, &bm);
 
         match &result {
             Ok(_) => rl.reset_penalty().await,
@@ -131,12 +176,22 @@ impl SearchServer {
         let result = async {
             interaction::navigate(tab.page(), &params.url, 15).await.map_err(to_mcp_error)?;
             tab.page().wait(500).await;
+
+            if interaction::is_captcha_present(tab.page()).await {
+                tracing::warn!(url = %params.url, "CAPTCHA detected, attempting resolve...");
+                match interaction::resolve_captcha_loop(tab.page(), 1).await {
+                    Ok(true) => tracing::info!("CAPTCHA resolved"),
+                    _ => tracing::warn!("CAPTCHA could not be resolved"),
+                }
+            }
+
             tab.page().content().await
                 .map_err(|e| to_mcp_error(format!("Failed to get page content: {}", e)))
         }
         .await;
 
         tab.close().await;
+        self.check_cdp_error(&result, &bm);
         let html = result?;
 
         if html.is_empty() {
@@ -148,6 +203,15 @@ impl SearchServer {
         let extracted = crate::extract::content::ContentExtractor::extract(
             &html, &params.url, params.max_length,
         ).map_err(to_mcp_error)?;
+
+        if extracted.is_low_quality() {
+            let reason = extracted.low_quality_reason().unwrap_or("unknown");
+            let text = format!(
+                "# {}\n\nSource: {} [READ_FAILED]\n\n---\n\n{}\n\n> Reason: {} (quality: {:.2})",
+                extracted.title, params.url, extracted.content, reason, extracted.quality
+            );
+            return Ok(CallToolResult::success(vec![Content::text(text)]));
+        }
 
         let mut content = extracted.content;
         if !params.include_links {
@@ -213,6 +277,12 @@ impl SearchServer {
                         let page_result = async {
                             interaction::navigate(tab.page(), &url, 15).await?;
                             tab.page().wait(500).await;
+
+                            if interaction::is_captcha_present(tab.page()).await {
+                                tracing::warn!(url = %url, "CAPTCHA detected in batch_read");
+                                let _ = interaction::resolve_captcha_loop(tab.page(), 1).await;
+                            }
+
                             tab.page().content().await
                                 .map_err(|e| anyhow::anyhow!("Content fetch failed: {}", e))
                         }.await;
@@ -226,6 +296,14 @@ impl SearchServer {
                         let extracted = crate::extract::content::ContentExtractor::extract(
                             &html, &url, max_length,
                         )?;
+
+                        if extracted.is_low_quality() {
+                            let reason = extracted.low_quality_reason().unwrap_or("unknown");
+                            anyhow::bail!(
+                                "[READ_FAILED] {} (quality: {:.2})",
+                                reason, extracted.quality
+                            );
+                        }
 
                         cache.insert(
                             cache_key,
@@ -292,7 +370,7 @@ impl SearchServer {
         Parameters(params): Parameters<tools::SearchAndReadParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let bm = self.browser().await?;
-        let rl = self.rate_limiter(bm).await;
+        let rl = self.rate_limiter(&bm).await;
         rl.wait().await;
 
         let engine = select_engine(
@@ -347,6 +425,12 @@ impl SearchServer {
                         let page_result = async {
                             interaction::navigate(tab.page(), &url, 15).await?;
                             tab.page().wait(500).await;
+
+                            if interaction::is_captcha_present(tab.page()).await {
+                                tracing::warn!(url = %url, "CAPTCHA detected in search_and_read");
+                                let _ = interaction::resolve_captcha_loop(tab.page(), 1).await;
+                            }
+
                             tab.page().content().await
                                 .map_err(|e| anyhow::anyhow!("Content fetch failed: {}", e))
                         }.await;
@@ -356,6 +440,14 @@ impl SearchServer {
                         let extracted = crate::extract::content::ContentExtractor::extract(
                             &html, &url, max_length,
                         )?;
+
+                        if extracted.is_low_quality() {
+                            let reason = extracted.low_quality_reason().unwrap_or("unknown");
+                            return Err(anyhow::anyhow!(
+                                "[READ_FAILED] {} (quality: {:.2})",
+                                reason, extracted.quality
+                            ));
+                        }
 
                         cache.insert(
                             cache_key,
@@ -454,6 +546,7 @@ impl SearchServer {
         }.await;
 
         tab.close().await;
+        self.check_cdp_error(&result, &bm);
         let data = result?;
 
         if let Some(ref path) = file_path {
@@ -472,6 +565,31 @@ impl SearchServer {
             Ok(CallToolResult::success(vec![Content::image(b64, mime)]))
         }
     }
+
+    #[tool(description = "Sync login state (cookies, sessions) from user's main Chrome to the debug profile. Use when read_page returns [READ_FAILED] on a page that requires authentication, or when the user reports expired login. After syncing, the browser will reconnect automatically — retry the failed read_page call.")]
+    async fn sync_login(&self) -> Result<CallToolResult, ErrorData> {
+        // Kill the debug Chrome process so cookie files are unlocked and
+        // won't be overwritten by Chrome's shutdown flush.
+        self.kill_debug_chrome().await;
+        self.browser.shutdown().await;
+
+        // Brief wait for process to fully exit and release file locks
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let (synced, skipped) = crate::commands::sync::sync_login_files()
+            .map_err(to_mcp_error)?;
+
+        let mut msg = format!(
+            "Login state synced: {} files updated, {} skipped.\n",
+            synced, skipped
+        );
+        if skipped > 0 {
+            msg.push_str("Some files were locked — they will be available after Chrome restarts.\n");
+        }
+        msg.push_str("Browser will auto-restart and reconnect on next tool call. Retry your previous request now.");
+
+        Ok(CallToolResult::success(vec![Content::text(msg)]))
+    }
 }
 
 #[tool_handler]
@@ -484,18 +602,38 @@ impl ServerHandler for SearchServer {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "ailonk-search: Web search and page reading via real Chrome browser.\n\
+                "ailonk-search: Web search and page reading via real Chrome browser with anti-bot protection.\n\
                 \n\
-                RECOMMENDED WORKFLOW:\n\
-                1. Start with 'search_and_read' — it searches AND reads top results in one call (most efficient).\n\
-                2. Use 'web_search' only when you need search results without reading pages.\n\
-                3. Use 'read_page' to read a specific URL you already have.\n\
-                4. Use 'batch_read' to read multiple URLs concurrently.\n\
+                TOOL SELECTION:\n\
+                1. search_and_read — primary tool. Searches AND reads top results in one call.\n\
+                2. web_search — when you only need titles/URLs/snippets, no full content.\n\
+                3. read_page — read a specific URL you already have (max_length up to 15000).\n\
+                4. batch_read — read multiple known URLs concurrently (up to 10).\n\
                 \n\
-                TIPS:\n\
-                - search_and_read saves 2-3 tool calls vs web_search + read_page separately.\n\
-                - Results are clean Markdown text, optimized for token efficiency.\n\
-                - The browser has anti-bot protection and can access pages requiring JavaScript.",
+                SEARCH STRATEGY:\n\
+                - For multi-topic queries (e.g. comparing 4 companies), split into separate searches per topic. \
+                Broad queries tend to be dominated by one subtopic.\n\
+                - For deep research, use multiple rounds: first broad, then targeted follow-ups with refined keywords.\n\
+                - Cross-verify key facts across rounds for accuracy.\n\
+                \n\
+                PARAMETER GUIDE:\n\
+                - read_count: 1-2 for quick overview, 3 for standard research, 4-5 for deep investigation.\n\
+                - max_length_per_page: default 5000. Increase to 8000-15000 for long-form articles, \
+                financial reports, or technical documentation.\n\
+                - search_count: default 10, increase for broader coverage.\n\
+                \n\
+                CONTENT RELIABILITY:\n\
+                - Pages marked [READ_FAILED] returned low-quality content (CAPTCHA, login wall, empty).\n\
+                - When you see [READ_FAILED], try an alternative URL from search results instead of retrying the same one.\n\
+                - Avoid reading pages from known walled sites (e.g. tieba.baidu.com, zhihu.com/question without answer) \
+                when better alternatives exist.\n\
+                - If a page requires login and returns empty/error content, call sync_login to refresh \
+                the browser's login state from the user's main Chrome, then retry.\n\
+                \n\
+                NOTES:\n\
+                - Results are clean Markdown, no summarization — you interpret the content.\n\
+                - The browser handles JavaScript rendering, cookie consent, and anti-bot measures.\n\
+                - If a call fails with a connection error, retry once — the browser auto-reconnects.",
             )
     }
 }

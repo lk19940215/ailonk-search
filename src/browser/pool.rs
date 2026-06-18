@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use eoka::{Browser, Page};
 use tokio::sync::Semaphore;
 
@@ -6,14 +7,16 @@ pub struct TabPool {
     browser: Arc<Browser>,
     semaphore: Arc<Semaphore>,
     max_tabs: usize,
+    healthy: Arc<AtomicBool>,
 }
 
 impl TabPool {
-    pub fn new(browser: Arc<Browser>, max_tabs: usize) -> Self {
+    pub fn new(browser: Arc<Browser>, max_tabs: usize, healthy: Arc<AtomicBool>) -> Self {
         Self {
             browser,
             semaphore: Arc::new(Semaphore::new(max_tabs)),
             max_tabs,
+            healthy,
         }
     }
 
@@ -32,7 +35,11 @@ impl TabPool {
         .map_err(|e| anyhow::anyhow!("Semaphore closed: {e}"))?;
 
         let page = self.browser.new_blank_page().await
-            .map_err(|e| anyhow::anyhow!("Failed to create new tab: {}", e))?;
+            .map_err(|e| {
+                self.healthy.store(false, Ordering::Relaxed);
+                tracing::error!("CDP connection failed, marking browser unhealthy: {}", e);
+                anyhow::anyhow!("Failed to create new tab: {}", e)
+            })?;
 
         let target_id = page.target_id().to_string();
 

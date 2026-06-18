@@ -17,6 +17,8 @@ pub enum Commands {
     Serve,
     /// Setup Chrome for optimal experience (one-time)
     Setup,
+    /// Sync login state (cookies, sessions) from main Chrome to debug profile
+    Sync,
     /// Remove debug profile symlink and print recovery instructions
     Cleanup,
     /// Run all test scenarios and output a structured report

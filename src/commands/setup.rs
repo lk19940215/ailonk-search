@@ -1,6 +1,6 @@
 use crate::browser::manager::find_chrome_path;
 
-fn default_chrome_profile_dir() -> Option<std::path::PathBuf> {
+pub fn default_chrome_profile_dir() -> Option<std::path::PathBuf> {
     let home = dirs::home_dir()?;
     #[cfg(target_os = "macos")]
     {
@@ -24,7 +24,7 @@ fn default_chrome_profile_dir() -> Option<std::path::PathBuf> {
     None
 }
 
-fn setup_profile_dir() -> std::path::PathBuf {
+pub fn setup_profile_dir() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join(".ailonk-search-profile")
@@ -38,7 +38,7 @@ const SYMLINK_FILES: &[&str] = &[
 
 /// SQLite databases — must be COPIED (symlink causes WAL lock conflicts
 /// between normal Chrome and debug Chrome).
-const COPY_FILES: &[&str] = &[
+pub const COPY_FILES: &[&str] = &[
     "Cookies", "Cookies-journal",
     "Login Data", "Login Data-journal",
     "Login Data For Account", "Login Data For Account-journal",
@@ -137,12 +137,12 @@ fn print_setup_instructions(chrome_path: Option<&str>, profile_dir: &std::path::
         println!(
             "\nChrome Search MCP — 一次性配置\n\n\
 在终端运行以下命令启动调试 Chrome:\n\n\
-  {escaped} --remote-debugging-port=19222 --user-data-dir=\"{dir}\" --no-first-run --no-default-browser-check &\n\n\
+  {escaped} --remote-debugging-port=19222 --user-data-dir=\"{dir}\" --profile-directory=Default --no-first-run --no-default-browser-check &\n\n\
   无需关闭已打开的 Chrome — 调试实例使用独立目录, 可与正常 Chrome 并行运行。\n\
   书签/扩展通过 symlink 实时同步, Cookie/登录态通过复制保留。\n\n\
 永久生效(可选):\n\
   添加以下 alias 到 ~/.zshrc 或 ~/.bashrc:\n\n\
-  alias ailonk-debug='{path} --remote-debugging-port=19222 --user-data-dir=\"{dir}\" --no-first-run --no-default-browser-check &'\n\n\
+  alias ailonk-debug='{path} --remote-debugging-port=19222 --user-data-dir=\"{dir}\" --profile-directory=Default --no-first-run --no-default-browser-check &'\n\n\
   之后只需运行 ailonk-debug 即可。\n\n\
 完成后, ailonk-search 会自动连接调试 Chrome (无需任何额外参数)。"
         );
@@ -154,11 +154,11 @@ fn print_setup_instructions(chrome_path: Option<&str>, profile_dir: &std::path::
         println!(
             "\nChrome Search MCP — 一次性配置\n\n\
 在终端运行以下命令启动调试 Chrome:\n\n\
-  {cmd} --remote-debugging-port=19222 --user-data-dir=\"{dir}\" --no-first-run --no-default-browser-check &\n\n\
+  {cmd} --remote-debugging-port=19222 --user-data-dir=\"{dir}\" --profile-directory=Default --no-first-run --no-default-browser-check &\n\n\
   无需关闭已打开的 Chrome — 调试实例使用独立目录, 可与正常 Chrome 并行运行。\n\n\
 永久生效(可选):\n\
   添加 alias 到 ~/.bashrc:\n\n\
-  alias ailonk-debug='{cmd} --remote-debugging-port=19222 --user-data-dir=\"{dir}\" --no-first-run --no-default-browser-check &'\n\n\
+  alias ailonk-debug='{cmd} --remote-debugging-port=19222 --user-data-dir=\"{dir}\" --profile-directory=Default --no-first-run --no-default-browser-check &'\n\n\
 完成后, ailonk-search 会自动连接 (无需额外参数)。"
         );
     }
@@ -170,11 +170,11 @@ fn print_setup_instructions(chrome_path: Option<&str>, profile_dir: &std::path::
         println!(
             "\nChrome Search MCP — 一次性配置\n\n\
 在命令行运行以下命令启动调试 Chrome:\n\n\
-  \"{path}\" --remote-debugging-port=19222 --user-data-dir=\"{dir}\" --no-first-run --no-default-browser-check\n\n\
+  \"{path}\" --remote-debugging-port=19222 --user-data-dir=\"{dir}\" --profile-directory=Default --no-first-run --no-default-browser-check\n\n\
   无需关闭已打开的 Chrome — 调试实例使用独立目录, 可与正常 Chrome 并行运行。\n\n\
 永久生效(可选):\n\
   右键 Chrome 快捷方式 → 属性 → 目标 后追加:\n\
-  --remote-debugging-port=19222 --user-data-dir=\"{dir}\" --no-first-run --no-default-browser-check"
+  --remote-debugging-port=19222 --user-data-dir=\"{dir}\" --profile-directory=Default --no-first-run --no-default-browser-check"
         );
     }
 
@@ -183,7 +183,7 @@ fn print_setup_instructions(chrome_path: Option<&str>, profile_dir: &std::path::
         println!(
             "\nChrome Search MCP — 一次性配置\n\n\
 请启动 Chrome 并开启远程调试:\n\
-  chrome --remote-debugging-port=19222 --user-data-dir=\"{dir}\""
+  chrome --remote-debugging-port=19222 --user-data-dir=\"{dir}\" --profile-directory=Default"
         );
     }
 }

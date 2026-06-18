@@ -1,6 +1,7 @@
 pub mod cleanup;
 pub mod serve;
 pub mod setup;
+pub mod sync;
 pub mod test;
 
 pub async fn run(cli: crate::cli::Cli) -> anyhow::Result<()> {
@@ -8,6 +9,7 @@ pub async fn run(cli: crate::cli::Cli) -> anyhow::Result<()> {
     match cli.command {
         None | Some(Commands::Serve) => serve::run(&cli.args).await,
         Some(Commands::Setup) => setup::run(&cli.args),
+        Some(Commands::Sync) => sync::run(),
         Some(Commands::Cleanup) => cleanup::run(),
         Some(Commands::TestAll) => test::run_all(&cli.args).await,
         Some(Commands::TestSearch { query, engine, count }) => {

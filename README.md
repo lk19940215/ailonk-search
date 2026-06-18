@@ -10,11 +10,12 @@
 
 ## 核心特性
 
-- **5 个 MCP 工具** — `search_and_read`（推荐）、`web_search`、`read_page`、`batch_read`、`screenshot`
+- **6 个 MCP 工具** — `search_and_read`（推荐）、`web_search`、`read_page`、`batch_read`、`screenshot`、`sync_login`
 - **反爬虫保护** — 基于 [eoka](https://crates.io/crates/eoka)：二进制补丁 + 指纹一致性 + 类人鼠标/键盘操作
 - **双运行模式** — **Headless**（零配置，适合服务器/CI）和 **UserChrome**（保留登录态、Cookie、扩展）
 - **ML 正文提取** — [rs-trafilatura](https://crates.io/crates/rs-trafilatura) 支持 7 种页面类型（文章、博客、新闻、产品、论坛、文档、通用）
-- **智能等待** — 自动识别 SSR/静态页面 vs SPA/动态渲染页面，按需等待
+- **智能等待** — 自动识别 SSR/静态页面 vs SPA/动态渲染页面，始终等待 network idle
+- **内容质量门控** — CAPTCHA/登录墙检测 + `rs-trafilatura` 质量评分，低质量内容标记 `[READ_FAILED]` 且不缓存
 - **Tab 池 + 缓存** — 信号量限制并发 Tab 数 + [moka](https://crates.io/crates/moka) 内容缓存（默认 TTL 300s）
 - **懒加载 Chrome** — 首次工具调用时才启动浏览器，`tools/list` 不触发启动
 - **多搜索引擎** — Google、Bing、DuckDuckGo，中国区自动选择 cn.bing.com
@@ -24,7 +25,7 @@
 
 ## 快速开始
 
-### 安装
+### 1. 安装
 
 **通过 npm（推荐，无需 Rust 环境）：**
 
@@ -58,17 +59,34 @@ cd ailonk-search
 cargo install --path .
 ```
 
-### 首次配置（UserChrome 模式）
+### 2. 选择运行模式
 
-如果需要访问登录态页面（GitHub、知乎、付费墙网站等），先运行一次配置：
+> **重要**：未运行 `setup` 时，工具自动以 Headless 模式运行（无可见浏览器窗口）。
+
+| 模式 | 适用场景 | 是否需要 setup |
+|------|---------|---------------|
+| **Headless**（默认 fallback） | 服务器、CI、快速体验、零配置 | 不需要 |
+| **UserChrome** | 需要登录态的网站（GitHub、知乎、付费墙） | **需要先运行 `setup`** |
+
+**选择 Headless 模式**（零配置，直接跳到第 3 步）：
 
 ```bash
+# 不需要任何额外操作，Headless 模式开箱即用
+```
+
+**选择 UserChrome 模式**（保留登录态、Cookie、扩展）：
+
+```bash
+# npm 安装用户：
+npx ailonk-search setup
+
+# GitHub Releases / 源码编译用户：
 ailonk-search setup
 ```
 
-按提示操作，会创建一个独立的调试 Chrome Profile（端口 19222），不影响正常浏览器使用。
+`setup` 会创建独立的调试 Chrome Profile（端口 19222），不影响正常浏览器使用。创建完成后，在该 Chrome 窗口中登录你需要的网站。登录态过期时可运行 `ailonk-search sync` 或通过 MCP 工具 `sync_login` 自动刷新。
 
-### MCP 配置
+### 3. 配置 MCP
 
 将 `ailonk-search` 添加到你的 AI 工具的 MCP 配置中。
 
@@ -86,6 +104,9 @@ ailonk-search setup
   }
 }
 ```
+
+> 上述配置会自动检测：有 Profile → UserChrome 模式，无 Profile → Headless 模式。
+> 若需强制 Headless：`"args": ["-y", "ailonk-search", "--headless"]`
 
 #### Claude Code
 
@@ -113,22 +134,17 @@ ailonk-search setup
 }
 ```
 
-**Headless 模式（无需 setup，适合服务器/CI）：**
+**其他配置示例：**
 
 ```json
+// 强制 Headless 模式
 "args": ["-y", "ailonk-search", "--headless"]
-```
 
-**UserChrome 模式（运行 `setup` 后使用，保留登录态）：**
-
-```json
-"args": ["-y", "ailonk-search"]
-```
-
-**自定义浏览器路径 / 区域：**
-
-```json
+// 自定义浏览器路径 + 中国区搜索
 "args": ["-y", "ailonk-search", "--chrome-path", "/path/to/chrome", "--region", "cn"]
+
+// 允许访问内网 URL
+"args": ["-y", "ailonk-search", "--allow-private-urls"]
 ```
 
 ---
@@ -142,6 +158,7 @@ ailonk-search setup
 | `read_page` | 读取指定 URL，提取为 Markdown | `url`, `include_links`, `max_length` |
 | `batch_read` | 并发读取最多 10 个 URL | `urls`, `max_length_per_page`, `concurrency` |
 | `screenshot` | 截图（返回 base64 或保存文件）。文本内容请用 `read_page` | `url`, `format`, `file_path` |
+| `sync_login` | 从主 Chrome 同步登录态到调试 Profile（AI 可自动调用） | 无参数 |
 
 **推荐工作流**：`search_and_read` → `read_page`（深入特定 URL）→ `web_search`（仅需结果列表时）
 
@@ -166,7 +183,8 @@ ailonk-search setup
 | 命令 | 说明 |
 |------|------|
 | `ailonk-search` / `serve` | 作为 MCP 服务器运行（默认） |
-| `setup` | 首次 UserChrome Profile 配置 |
+| `setup` | 创建 UserChrome Profile（独立调试实例） |
+| `sync` | 同步登录态（Cookies + localStorage + sessionStorage） |
 | `cleanup` | 清理调试 Profile 并打印恢复步骤 |
 | `test-all` | 运行所有测试场景 |
 | `test-search` | 开发：直接测试搜索 |
@@ -187,8 +205,8 @@ ailonk-search setup
 
 ### UserChrome 模式
 
-- 连接（或启动）真实 Chrome 实例，使用 `~/.ailonk-search-profile` 配置
-- 保留登录态、Cookie、浏览器扩展
+- 连接（或启动）真实 Chrome 实例，使用 `~/.ailonk-search-profile` 独立配置
+- 通过 `sync` 命令或 MCP `sync_login` 工具从主 Chrome 同步登录态
 - 使用调试端口 **19222**，与正常 Chrome 共存
 - 适合：需要登录的网站、验证码频繁的页面、非中国区 Google 搜索
 - 默认引擎：**Google**（全球）或 **Bing cn**（中国）
@@ -245,7 +263,7 @@ src/
 ├── search/       # Google、Bing、DuckDuckGo 搜索引擎
 ├── extract/      # rs-trafilatura 正文提取
 ├── cache/        # moka 内容缓存
-└── commands/     # CLI 子命令（serve、setup、test）
+└── commands/     # CLI 子命令（serve、setup、sync、test）
 ```
 
 ---
