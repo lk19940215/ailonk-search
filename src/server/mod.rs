@@ -11,7 +11,7 @@ use rmcp::{
 };
 
 use crate::browser::interaction;
-use crate::browser::manager::BrowserManager;
+use crate::browser::manager::{BrowserManager, LazyBrowserManager};
 use crate::cache::{CachedContent, ContentCache};
 use crate::search::engine::{
     format_search_results, search_with_fallback, select_engine, to_mcp_error, RateLimiter,
@@ -19,32 +19,44 @@ use crate::search::engine::{
 
 #[derive(Clone)]
 pub struct SearchServer {
-    pub browser_manager: Arc<BrowserManager>,
+    browser: Arc<LazyBrowserManager>,
     pub default_engine: String,
     pub region: &'static str,
-    pub rate_limiter: Arc<RateLimiter>,
+    rate_limiter: tokio::sync::OnceCell<Arc<RateLimiter>>,
     pub cache: ContentCache,
 }
 
 impl SearchServer {
     pub fn new(
-        browser_manager: Arc<BrowserManager>,
+        browser: Arc<LazyBrowserManager>,
         default_engine: String,
         cache_ttl: u64,
         region: &'static str,
     ) -> Self {
-        use crate::browser::manager::ConnectionMode;
-        let rate_interval = match browser_manager.mode() {
-            ConnectionMode::Headless => 5000,
-            ConnectionMode::UserChrome => 2000,
-        };
         Self {
-            browser_manager,
+            browser,
             default_engine,
             region,
-            rate_limiter: Arc::new(RateLimiter::new(rate_interval)),
+            rate_limiter: tokio::sync::OnceCell::new(),
             cache: ContentCache::new(cache_ttl),
         }
+    }
+
+    async fn browser(&self) -> Result<&Arc<BrowserManager>, ErrorData> {
+        self.browser.get().await.map_err(to_mcp_error)
+    }
+
+    async fn rate_limiter(&self, bm: &BrowserManager) -> &Arc<RateLimiter> {
+        use crate::browser::manager::ConnectionMode;
+        self.rate_limiter
+            .get_or_init(|| async {
+                let ms = match bm.mode() {
+                    ConnectionMode::Headless => 5000,
+                    ConnectionMode::UserChrome => 2000,
+                };
+                Arc::new(RateLimiter::new(ms))
+            })
+            .await
     }
 }
 
@@ -55,21 +67,23 @@ impl SearchServer {
         &self,
         Parameters(params): Parameters<tools::WebSearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.rate_limiter.wait().await;
+        let bm = self.browser().await?;
+        let rl = self.rate_limiter(bm).await;
+        rl.wait().await;
 
         let engine = select_engine(
             &params.engine,
-            self.browser_manager.mode(),
+            bm.mode(),
             &self.default_engine,
             self.region,
         );
 
-        let tab = self.browser_manager.tab_pool().acquire().await.map_err(to_mcp_error)?;
+        let tab = bm.tab_pool().acquire().await.map_err(to_mcp_error)?;
 
         let result = async {
             search_with_fallback(
                 engine,
-                self.browser_manager.mode(),
+                bm.mode(),
                 tab.page(),
                 &params.query,
                 params.count,
@@ -83,8 +97,8 @@ impl SearchServer {
         tab.close().await;
 
         match &result {
-            Ok(_) => self.rate_limiter.reset_penalty().await,
-            Err(_) => self.rate_limiter.backoff().await,
+            Ok(_) => rl.reset_penalty().await,
+            Err(_) => rl.backoff().await,
         }
 
         let (engine_name, results) = result?;
@@ -108,12 +122,12 @@ impl SearchServer {
             return Ok(CallToolResult::success(vec![Content::text(text)]));
         }
 
-        let tab = self.browser_manager.tab_pool().acquire().await.map_err(to_mcp_error)?;
+        let bm = self.browser().await?;
+        let tab = bm.tab_pool().acquire().await.map_err(to_mcp_error)?;
 
         let result = async {
             interaction::navigate(tab.page(), &params.url, 15).await.map_err(to_mcp_error)?;
-            tab.page().wait_for("body", 5000).await.ok();
-            tab.page().wait(1000).await;
+            tab.page().wait(500).await;
             tab.page().content().await
                 .map_err(|e| to_mcp_error(format!("Failed to get page content: {}", e)))
         }
@@ -123,9 +137,9 @@ impl SearchServer {
         let html = result?;
 
         if html.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "Failed to load content from {}", params.url
-            ))]));
+            return Err(to_mcp_error(format!(
+                "Failed to load content from {} — page returned empty HTML", params.url
+            )));
         }
 
         let extracted = crate::extract::content::ContentExtractor::extract(
@@ -162,9 +176,10 @@ impl SearchServer {
             return Ok(CallToolResult::success(vec![Content::text("No URLs provided.")]));
         }
 
+        let bm = self.browser().await?.clone();
         let effective_concurrency = params.concurrency
             .max(1)
-            .min(self.browser_manager.tab_pool().max_tabs())
+            .min(bm.tab_pool().max_tabs())
             .min(urls.len());
 
         let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_concurrency));
@@ -173,7 +188,7 @@ impl SearchServer {
         for url in urls.iter() {
             let sem = semaphore.clone();
             let url = url.clone();
-            let bm = self.browser_manager.clone();
+            let bm = bm.clone();
             let cache = self.cache.clone();
             let max_length = params.max_length_per_page;
 
@@ -194,8 +209,7 @@ impl SearchServer {
                         let tab = bm.tab_pool().acquire().await?;
                         let page_result = async {
                             interaction::navigate(tab.page(), &url, 15).await?;
-                            tab.page().wait_for("body", 5000).await.ok();
-                            tab.page().wait(1000).await;
+                            tab.page().wait(500).await;
                             tab.page().content().await
                                 .map_err(|e| anyhow::anyhow!("Content fetch failed: {}", e))
                         }.await;
@@ -269,24 +283,27 @@ impl SearchServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-    #[tool(description = "Search the web and automatically read the top results. Combines web_search + batch_read in a single call — optimal for AI research tasks. Returns both search result list and full content of top pages.")]
+    #[tool(description = "RECOMMENDED: Search the web and automatically read the top results in one call. Returns both search result list and extracted page content. Use this as your primary research tool — it replaces the need for separate web_search + read_page calls.")]
     async fn search_and_read(
         &self,
         Parameters(params): Parameters<tools::SearchAndReadParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.rate_limiter.wait().await;
+        let bm = self.browser().await?;
+        let rl = self.rate_limiter(bm).await;
+        rl.wait().await;
+
         let engine = select_engine(
             &params.engine,
-            self.browser_manager.mode(),
+            bm.mode(),
             &self.default_engine,
             self.region,
         );
 
-        let tab = self.browser_manager.tab_pool().acquire().await.map_err(to_mcp_error)?;
+        let tab = bm.tab_pool().acquire().await.map_err(to_mcp_error)?;
         let search_result = async {
             search_with_fallback(
                 engine,
-                self.browser_manager.mode(),
+                bm.mode(),
                 tab.page(),
                 &params.query,
                 params.search_count,
@@ -296,9 +313,9 @@ impl SearchServer {
         tab.close().await;
 
         if search_result.is_err() {
-            self.rate_limiter.backoff().await;
+            rl.backoff().await;
         } else {
-            self.rate_limiter.reset_penalty().await;
+            rl.reset_penalty().await;
         }
 
         let (engine_name, search_results) = search_result.map_err(to_mcp_error)?;
@@ -306,10 +323,11 @@ impl SearchServer {
         let read_count = params.read_count.min(5).min(search_results.len());
         let urls_to_read: Vec<String> = search_results.iter().take(read_count).map(|r| r.url.clone()).collect();
 
+        let bm = bm.clone();
         let mut handles = vec![];
         for url in urls_to_read.iter() {
             let url = url.clone();
-            let bm = self.browser_manager.clone();
+            let bm = bm.clone();
             let cache = self.cache.clone();
             let max_length = params.max_length_per_page;
 
@@ -325,8 +343,7 @@ impl SearchServer {
                         let tab = bm.tab_pool().acquire().await?;
                         let page_result = async {
                             interaction::navigate(tab.page(), &url, 15).await?;
-                            tab.page().wait_for("body", 5000).await.ok();
-                            tab.page().wait(1000).await;
+                            tab.page().wait(500).await;
                             tab.page().content().await
                                 .map_err(|e| anyhow::anyhow!("Content fetch failed: {}", e))
                         }.await;
@@ -401,7 +418,7 @@ impl SearchServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-    #[tool(description = "Take a screenshot of a webpage using Chrome. Returns base64-encoded PNG image or saves to file.")]
+    #[tool(description = "Take a screenshot of a webpage. Only use when visual content is specifically needed — prefer read_page for text content as it is far more token-efficient.")]
     async fn screenshot(
         &self,
         Parameters(params): Parameters<tools::ScreenshotParams>,
@@ -411,14 +428,14 @@ impl SearchServer {
             interaction::validate_file_path(path).map_err(to_mcp_error)?;
         }
 
-        let tab = self.browser_manager.tab_pool().acquire().await.map_err(to_mcp_error)?;
+        let bm = self.browser().await?;
+        let tab = bm.tab_pool().acquire().await.map_err(to_mcp_error)?;
         let file_path = params.file_path.clone();
         let format_str = params.format.clone();
 
         let result = async {
             interaction::navigate(tab.page(), &params.url, 15).await.map_err(to_mcp_error)?;
-            tab.page().wait_for("body", 5000).await.ok();
-            tab.page().wait(1000).await;
+            tab.page().wait(500).await;
 
             let data = match format_str.as_str() {
                 "jpeg" | "jpg" => {
@@ -464,11 +481,18 @@ impl ServerHandler for SearchServer {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "Chrome Search MCP provides web search and content extraction via Chrome DevTools Protocol. \
-                Use 'search_and_read' for research tasks (combines search + read in one call). \
-                Use 'web_search' when you only need search results. \
-                Use 'read_page' or 'batch_read' to extract content from specific URLs. \
-                Use 'screenshot' to capture visual snapshots.",
+                "ailonk-search: Web search and page reading via real Chrome browser.\n\
+                \n\
+                RECOMMENDED WORKFLOW:\n\
+                1. Start with 'search_and_read' — it searches AND reads top results in one call (most efficient).\n\
+                2. Use 'web_search' only when you need search results without reading pages.\n\
+                3. Use 'read_page' to read a specific URL you already have.\n\
+                4. Use 'batch_read' to read multiple URLs concurrently.\n\
+                \n\
+                TIPS:\n\
+                - search_and_read saves 2-3 tool calls vs web_search + read_page separately.\n\
+                - Results are clean Markdown text, optimized for token efficiency.\n\
+                - The browser has anti-bot protection and can access pages requiring JavaScript.",
             )
     }
 }

@@ -24,8 +24,18 @@ pub fn validate_file_path(path: &str) -> anyhow::Result<()> {
 pub async fn navigate(page: &Page, url: &str, timeout_secs: u64) -> anyhow::Result<()> {
     page.goto(url).await
         .map_err(|e| anyhow::anyhow!("Navigation failed for {}: {}", url, e))?;
-    page.wait_for_network_idle(500, timeout_secs * 1000).await
-        .map_err(|e| anyhow::anyhow!("Network idle timeout after {}s for {}: {}", timeout_secs, url, e))?;
+
+    // Wait for DOM + body first (fast, reliable), then attempt brief network idle.
+    // This avoids hanging on pages with long-running analytics/ad scripts.
+    page.wait_for("body", timeout_secs * 1000).await.ok();
+
+    let idle_timeout = (timeout_secs * 1000).min(8000);
+    match page.wait_for_network_idle(500, idle_timeout).await {
+        Ok(_) => {}
+        Err(_) => {
+            tracing::debug!(url, "Network not fully idle, proceeding with DOM-ready content");
+        }
+    }
     Ok(())
 }
 

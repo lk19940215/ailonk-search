@@ -47,3 +47,6 @@ urlencoding = "2"
 url = "2"
 rand = "0.9"
 dirs = "6"
+
+[dev-dependencies]
+rmcp = { version = "1.7", features = ["client", "transport-child-process"] }

@@ -5,6 +5,36 @@ use super::pool::TabPool;
 
 const DEBUG_PORT: u16 = 19222;
 
+pub struct LazyBrowserManager {
+    args: crate::cli::Args,
+    inner: tokio::sync::OnceCell<Arc<BrowserManager>>,
+}
+
+impl LazyBrowserManager {
+    pub fn new(args: &crate::cli::Args) -> Arc<Self> {
+        Arc::new(Self {
+            args: args.clone(),
+            inner: tokio::sync::OnceCell::new(),
+        })
+    }
+
+    pub async fn get(&self) -> anyhow::Result<&Arc<BrowserManager>> {
+        self.inner
+            .get_or_try_init(|| async {
+                tracing::info!("First tool call — initializing Chrome...");
+                let bm = BrowserManager::new(&self.args).await?;
+                Ok(Arc::new(bm))
+            })
+            .await
+    }
+
+    pub async fn shutdown(&self) {
+        if let Some(bm) = self.inner.get() {
+            bm.shutdown().await;
+        }
+    }
+}
+
 pub enum ConnectionMode {
     UserChrome,
     Headless,
@@ -179,14 +209,25 @@ pub fn find_chrome_path(cli_path: &Option<String>) -> Option<String> {
 
     #[cfg(target_os = "macos")]
     {
-        let default = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-        if std::path::Path::new(default).exists() {
-            return Some(default.to_string());
+        let candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ];
+        for path in &candidates {
+            if std::path::Path::new(path).exists() {
+                return Some(path.to_string());
+            }
         }
     }
     #[cfg(target_os = "linux")]
     {
-        for cmd in &["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"] {
+        let commands = [
+            "google-chrome", "google-chrome-stable",
+            "microsoft-edge", "microsoft-edge-stable",
+            "chromium", "chromium-browser",
+        ];
+        for cmd in &commands {
             if let Ok(output) = std::process::Command::new("which").arg(cmd).output() {
                 if output.status.success() {
                     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -202,6 +243,8 @@ pub fn find_chrome_path(cli_path: &Option<String>) -> Option<String> {
         let paths = [
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
         ];
         for path in &paths {
             if std::path::Path::new(path).exists() {
