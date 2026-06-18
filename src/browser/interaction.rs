@@ -23,14 +23,28 @@ pub fn validate_file_path(path: &str) -> anyhow::Result<()> {
 
 /// Navigate to URL and wait for page to be ready for content extraction.
 ///
-/// Strategy: goto → wait for body (DOM loaded) → attempt brief network idle.
-/// Network idle has a hard cap to avoid hanging on pages with persistent
-/// connections (analytics, ads, websockets).
+/// Strategy:
+/// 1. goto (waits for load event internally)
+/// 2. Wait for body element
+/// 3. Quick check: if DOM already has substantial text (SSR/static), skip network idle
+/// 4. Otherwise wait for network idle (needed for SPA/JS-rendered pages)
 pub async fn navigate(page: &Page, url: &str, timeout_secs: u64) -> anyhow::Result<()> {
     page.goto(url).await
         .map_err(|e| anyhow::anyhow!("Navigation failed for {}: {}", url, e))?;
 
     page.wait_for("body", timeout_secs * 1000).await.ok();
+
+    // If body already has content (SSR/static page), a brief settle is enough.
+    // For SPAs that render via JS + API calls, fall through to network idle.
+    let has_content: bool = page
+        .evaluate("(document.body.innerText || '').length > 200")
+        .await
+        .unwrap_or(false);
+
+    if has_content {
+        page.wait(300).await;
+        return Ok(());
+    }
 
     match page.wait_for_network_idle(500, 6000).await {
         Ok(_) => {}
