@@ -1,11 +1,63 @@
 use eoka::Page;
 
-pub fn validate_url(url: &str) -> anyhow::Result<()> {
-    let lower = url.to_lowercase();
-    if !lower.starts_with("http://") && !lower.starts_with("https://") {
-        anyhow::bail!("URL scheme not allowed (only http/https): {}", url);
+pub fn validate_url(url_str: &str, allow_private: bool) -> anyhow::Result<()> {
+    let parsed = url::Url::parse(url_str)
+        .map_err(|e| anyhow::anyhow!("Invalid URL '{}': {}", url_str, e))?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        s => anyhow::bail!("URL scheme '{}' not allowed (only http/https)", s),
+    }
+
+    if allow_private {
+        return Ok(());
+    }
+
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => {
+            if ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+            {
+                anyhow::bail!("Private/internal IPs are not allowed: {}. Use --allow-private-urls to override.", url_str);
+            }
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            if ip.is_loopback()
+                || ip.is_unspecified()
+                || is_private_ipv6(&ip)
+            {
+                anyhow::bail!("Private/internal IPs are not allowed: {}. Use --allow-private-urls to override.", url_str);
+            }
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                if mapped.is_loopback() || mapped.is_private() || mapped.is_link_local() {
+                    anyhow::bail!("Private/internal IPs are not allowed: {}. Use --allow-private-urls to override.", url_str);
+                }
+            }
+        }
+        Some(url::Host::Domain(domain)) => {
+            let d = domain.to_lowercase();
+            if d == "localhost"
+                || d.ends_with(".local")
+                || d.ends_with(".internal")
+            {
+                anyhow::bail!("Private/internal domains are not allowed: {}. Use --allow-private-urls to override.", url_str);
+            }
+        }
+        None => {
+            anyhow::bail!("URL has no host: {}", url_str);
+        }
     }
     Ok(())
+}
+
+fn is_private_ipv6(ip: &std::net::Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    // fc00::/7 (unique local)
+    (segments[0] & 0xfe00) == 0xfc00
+    // fe80::/10 (link-local)
+    || (segments[0] & 0xffc0) == 0xfe80
 }
 
 pub fn validate_file_path(path: &str) -> anyhow::Result<()> {

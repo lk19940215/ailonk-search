@@ -67,14 +67,7 @@ pub struct BatchReadParams {
 pub struct ScreenshotParams {
     /// The URL to capture (http/https only)
     pub url: String,
-    /// Capture the full scrollable page instead of the visible viewport (default: false)
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub full_page: bool,
-    /// CSS selector to screenshot a specific element instead of the full page
-    #[allow(dead_code)]
-    pub selector: Option<String>,
-    /// Image format: png, jpeg, or webp (default: png)
+    /// Image format: png or jpeg (default: png)
     #[serde(default = "default_screenshot_format")]
     pub format: String,
     /// Optional file path to save the screenshot instead of returning inline base64

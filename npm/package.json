@@ -1,0 +1,33 @@
+{
+  "name": "ailonk-search",
+  "version": "0.1.0",
+  "description": "MCP server using real Chrome for web search & Markdown extraction",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lk19940215/ailonk-search.git"
+  },
+  "homepage": "https://github.com/lk19940215/ailonk-search",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "chrome",
+    "cdp",
+    "web-search",
+    "ai-agents",
+    "cursor",
+    "claude",
+    "headless-browser",
+    "content-extraction"
+  ],
+  "bin": {
+    "ailonk-search": "run.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "install.js",
+    "run.js"
+  ]
+}

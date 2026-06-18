@@ -78,4 +78,8 @@ pub struct Args {
     /// Cache TTL in seconds (0 to disable)
     #[arg(long, default_value = "300")]
     pub cache_ttl: u64,
+
+    /// Allow accessing private/internal URLs (127.0.0.1, 192.168.*, etc.)
+    #[arg(long, global = true)]
+    pub allow_private_urls: bool,
 }

@@ -1,0 +1,305 @@
+# ailonk-search
+
+**Real Chrome MCP server for AI web search and Markdown content extraction.**
+
+`ailonk-search` is a Rust-based [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that drives a real Chrome/Chromium browser via CDP. It gives AI agents reliable web search and page reading with anti-bot protection, smart page-load detection, and token-efficient Markdown output.
+
+---
+
+## Features
+
+- **5 MCP tools** — `web_search`, `read_page`, `batch_read`, `search_and_read` (recommended), and `screenshot`
+- **Anti-bot stealth** — powered by [eoka](https://crates.io/crates/eoka): binary patching, human-like input, and consistent fingerprints
+- **Two connection modes** — **Headless** (zero-config server) and **UserChrome** (preserves login state, cookies, and extensions)
+- **ML content extraction** — [rs-trafilatura](https://crates.io/crates/rs-trafilatura) extracts main content across 7 page types (article, blog, news, product, forum, documentation, generic)
+- **Smart page loading** — detects SSR vs SPA pages and waits accordingly (DOM content check → network idle fallback)
+- **Tab pool + caching** — semaphore-limited concurrent tabs with [moka](https://crates.io/crates/moka) content cache (default TTL 300 s)
+- **Lazy Chrome init** — Chrome starts on the first tool call, not on `tools/list` (fast MCP handshake)
+- **Multi-engine search** — Google, Bing, DuckDuckGo with region-aware auto-selection (`cn` → cn.bing.com)
+- **Auto browser detection** — finds Google Chrome, Microsoft Edge, or Chromium on macOS, Linux, and Windows
+
+---
+
+## Quick Start
+
+### Install
+
+**Via npm (recommended, no Rust required):**
+
+```bash
+npx ailonk-search --help
+# or install globally
+npm install -g ailonk-search
+```
+
+**From GitHub Releases:**
+
+```bash
+# macOS (Apple Silicon)
+curl -L https://github.com/lk19940215/ailonk-search/releases/latest/download/ailonk-search-aarch64-apple-darwin \
+  -o /usr/local/bin/ailonk-search && chmod +x /usr/local/bin/ailonk-search
+
+# macOS (Intel)
+curl -L https://github.com/lk19940215/ailonk-search/releases/latest/download/ailonk-search-x86_64-apple-darwin \
+  -o /usr/local/bin/ailonk-search && chmod +x /usr/local/bin/ailonk-search
+
+# Linux (x86_64)
+curl -L https://github.com/lk19940215/ailonk-search/releases/latest/download/ailonk-search-x86_64-unknown-linux-gnu \
+  -o /usr/local/bin/ailonk-search && chmod +x /usr/local/bin/ailonk-search
+```
+
+**From source (requires Rust 1.91+):**
+
+```bash
+git clone https://github.com/lk19940215/ailonk-search.git
+cd ailonk-search
+cargo install --path .
+```
+
+### One-time setup (UserChrome mode, recommended)
+
+For pages that require login (GitHub, paywalled sites, etc.), set up a debug Chrome profile:
+
+```bash
+ailonk-search setup
+```
+
+Follow the printed instructions to launch Chrome with remote debugging on port `19222`. Bookmarks and extensions sync via symlink; cookies and login state are copied from your main profile.
+
+### MCP configuration
+
+Add `ailonk-search` to your MCP client config. The server speaks stdio MCP — no HTTP port needed.
+
+#### Cursor
+
+Edit `~/.cursor/mcp.json` (or project `.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "ailonk-search": {
+      "command": "npx",
+      "args": ["-y", "ailonk-search"]
+    }
+  }
+}
+```
+
+#### Claude Code
+
+Edit `~/.claude/settings.json` or project `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "ailonk-search": {
+      "command": "npx",
+      "args": ["-y", "ailonk-search"]
+    }
+  }
+}
+```
+
+#### Codex / OpenAI CLI
+
+```json
+{
+  "ailonk-search": {
+    "command": "npx",
+    "args": ["-y", "ailonk-search", "--headless"]
+  }
+}
+```
+
+**Headless mode (no setup, for servers/CI):**
+
+```json
+"args": ["-y", "ailonk-search", "--headless"]
+```
+
+**UserChrome mode (with login state, after `ailonk-search setup`):**
+
+```json
+"args": ["-y", "ailonk-search"]
+```
+
+**Custom Chrome path or region:**
+
+```json
+"args": ["-y", "ailonk-search", "--chrome-path", "/path/to/chrome", "--region", "cn"]
+```
+
+---
+
+## Tools
+
+| Tool | Description | Key parameters |
+|------|-------------|----------------|
+| `search_and_read` | **Recommended.** Search the web and read top results in one call. | `query`, `engine` (auto/google/bing/duckduckgo), `search_count` (1–20, default 10), `read_count` (1–5, default 3), `max_length_per_page` (default 5000) |
+| `web_search` | Search only — returns titles, URLs, and snippets. | `query`, `engine`, `count` (1–20, default 10) |
+| `read_page` | Fetch a single URL and extract clean Markdown. | `url`, `include_links` (default true), `max_length` (default 15000) |
+| `batch_read` | Read up to 10 URLs concurrently. | `urls`, `max_length_per_page` (default 5000), `concurrency` (default 5, max 10) |
+| `screenshot` | Capture a page as PNG/JPEG (base64 or file). Prefer `read_page` for text. | `url`, `format` (png/jpeg), `file_path` (optional) |
+
+**Recommended workflow:** start with `search_and_read` → use `read_page` for specific URLs → use `web_search` when you only need result lists.
+
+---
+
+## Configuration
+
+Global CLI flags (apply to all subcommands):
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--remote-url` | — | Connect to an existing Chrome CDP endpoint (e.g. `http://127.0.0.1:19222`) |
+| `--headless` | false | Force headless Chrome (skip auto-connect to UserChrome) |
+| `--chrome-path` | auto-detect | Path to Chrome/Edge/Chromium executable |
+| `--engine` | `auto` | Default search engine: `auto`, `google`, or `bing` |
+| `--region` | `auto` | Search region: `auto` (detect locale), `cn`, or `global` |
+| `--max-tabs` | `5` | Maximum concurrent browser tabs |
+| `--chrome-args` | — | Extra Chrome launch args (comma-separated) |
+| `--cache-ttl` | `300` | Content cache TTL in seconds (`0` to disable) |
+| `--allow-private-urls` | false | Allow accessing private/internal URLs (127.0.0.1, 192.168.*, etc.) |
+
+### Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `ailonk-search` / `serve` | Run as MCP server (default) |
+| `setup` | One-time UserChrome profile setup |
+| `cleanup` | Remove debug profile symlink and print recovery steps |
+| `test-all` | Run all test scenarios with a structured report |
+| `test-search` | Dev: test search directly (no MCP) |
+| `test-read` | Dev: test page reading directly |
+| `test-search-and-read` | Dev: test search + read flow |
+
+---
+
+## Modes
+
+### Headless
+
+- Launched automatically when `--headless` is set, no setup profile exists, or UserChrome connection fails
+- Uses eoka stealth: binary patching, human mouse/typing simulation
+- Best for: servers, CI, headless environments, zero-config usage
+- Default engine: **Bing** (more reliable against bot detection in headless mode)
+- Rate limit: 5 s between search requests
+
+### UserChrome
+
+- Connects to (or launches) a real Chrome instance with your profile at `~/.ailonk-search-profile`
+- Preserves login state, cookies, and extensions via the `setup` command
+- Runs on debug port **19222** — can coexist with your normal Chrome session
+- Best for: authenticated sites, CAPTCHA-prone pages, Google search in non-CN regions
+- Default engine: **Google** (global) or **Bing cn** (China)
+- Rate limit: 2 s between search requests
+
+| Scenario | Recommended mode |
+|----------|-----------------|
+| Quick setup, server/CI | Headless (`--headless`) |
+| Logged-in sites (GitHub, docs behind auth) | UserChrome (`setup` + default args) |
+| China mainland search | UserChrome or `--region cn` |
+| Connect to existing Chrome | `--remote-url http://127.0.0.1:9222` |
+
+---
+
+## Development
+
+### Build
+
+```bash
+cargo build
+cargo build --release
+```
+
+### Run locally (stdio MCP)
+
+```bash
+cargo run -- --headless          # headless mode
+cargo run --                     # UserChrome (requires setup)
+RUST_LOG=ailonk_search=debug cargo run -- --headless
+```
+
+### Test
+
+```bash
+# Protocol tests (fast, no Chrome)
+cargo test --test mcp_integration -- --test-threads=1
+
+# Full E2E tests (requires Chrome + network)
+cargo test --test mcp_integration -- --ignored --test-threads=1
+
+# Dev smoke tests
+cargo run -- test-search "Rust async programming"
+cargo run -- --headless test-read "https://example.com"
+cargo run -- --headless test-search-and-read "MCP protocol" --read-count 2
+cargo run -- test-all
+```
+
+### Project structure
+
+```
+src/
+├── server/       # MCP tool definitions and handlers
+├── browser/      # Chrome CDP manager, tab pool, navigation
+├── search/       # Google, Bing, DuckDuckGo engines
+├── extract/      # rs-trafilatura content extraction
+├── cache/        # moka content cache
+└── commands/     # CLI subcommands (serve, setup, test)
+```
+
+---
+
+## 简体中文
+
+**ailonk-search** 是一个基于 Rust 的 Chrome CDP MCP 服务器，让 AI 助手通过真实浏览器进行网页搜索和内容提取。
+
+### 核心特性
+
+- 5 个 MCP 工具：`search_and_read`（推荐）、`web_search`、`read_page`、`batch_read`、`screenshot`
+- 反爬虫保护：eoka 二进制补丁 + 指纹一致性 + 类人操作
+- 双模式：**Headless**（无配置开箱即用）和 **UserChrome**（保留登录态）
+- ML 正文提取：rs-trafilatura 支持 7 种页面类型
+- 智能等待：自动识别 SSR / SPA 页面
+- 懒加载 Chrome：首次工具调用时才启动浏览器
+- 支持 Google、Bing、DuckDuckGo，中国区自动选择 cn.bing.com
+
+### 快速开始
+
+```bash
+# 通过 npm 安装（推荐）
+npm install -g ailonk-search
+
+# UserChrome 模式（推荐，支持登录态）
+ailonk-search setup
+
+# Headless 模式（无需 setup）
+ailonk-search --headless
+```
+
+MCP 配置示例（Cursor / Claude Code）：
+
+```json
+{
+  "mcpServers": {
+    "ailonk-search": {
+      "command": "npx",
+      "args": ["-y", "ailonk-search", "--headless"]
+    }
+  }
+}
+```
+
+### 模式选择
+
+| 场景 | 推荐模式 |
+|------|---------|
+| 服务器 / CI / 快速体验 | Headless |
+| 需要登录的网站 | UserChrome（先运行 `setup`） |
+| 中国大陆搜索 | `--region cn` 或 UserChrome |
+
+---
+
+## License
+
+See repository license file.

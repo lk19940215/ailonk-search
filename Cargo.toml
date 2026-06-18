@@ -2,7 +2,7 @@
 name = "ailonk-search"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.91"
 description = "Chrome CDP-based MCP Server for web search and content extraction"
 
 [dependencies]
@@ -15,7 +15,6 @@ eoka = "0.3"
 # --- Async ---
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
-scraper = "0.27"
 
 # --- 序列化 ---
 serde = { version = "1", features = ["derive"] }

@@ -24,6 +24,7 @@ pub struct SearchServer {
     pub region: &'static str,
     rate_limiter: tokio::sync::OnceCell<Arc<RateLimiter>>,
     pub cache: ContentCache,
+    pub allow_private_urls: bool,
 }
 
 impl SearchServer {
@@ -32,6 +33,7 @@ impl SearchServer {
         default_engine: String,
         cache_ttl: u64,
         region: &'static str,
+        allow_private_urls: bool,
     ) -> Self {
         Self {
             browser,
@@ -39,6 +41,7 @@ impl SearchServer {
             region,
             rate_limiter: tokio::sync::OnceCell::new(),
             cache: ContentCache::new(cache_ttl),
+            allow_private_urls,
         }
     }
 
@@ -111,7 +114,7 @@ impl SearchServer {
         &self,
         Parameters(params): Parameters<tools::ReadPageParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        interaction::validate_url(&params.url).map_err(to_mcp_error)?;
+        interaction::validate_url(&params.url, self.allow_private_urls).map_err(to_mcp_error)?;
         let cache_key = ContentCache::key(&params.url, params.include_links, params.max_length);
         if let Some(cached) = self.cache.get(&cache_key).await {
             tracing::debug!(url = %params.url, "Cache hit");
@@ -170,7 +173,7 @@ impl SearchServer {
     ) -> Result<CallToolResult, ErrorData> {
         let urls: Vec<String> = params.urls.into_iter().take(10).collect();
         for url in &urls {
-            interaction::validate_url(url).map_err(to_mcp_error)?;
+            interaction::validate_url(url, self.allow_private_urls).map_err(to_mcp_error)?;
         }
         if urls.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text("No URLs provided.")]));
@@ -423,7 +426,7 @@ impl SearchServer {
         &self,
         Parameters(params): Parameters<tools::ScreenshotParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        interaction::validate_url(&params.url).map_err(to_mcp_error)?;
+        interaction::validate_url(&params.url, self.allow_private_urls).map_err(to_mcp_error)?;
         if let Some(ref path) = params.file_path {
             interaction::validate_file_path(path).map_err(to_mcp_error)?;
         }

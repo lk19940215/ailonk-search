@@ -15,6 +15,7 @@ pub async fn run(args: &crate::cli::Args) -> anyhow::Result<()> {
             args.engine.clone(),
             args.cache_ttl,
             region,
+            args.allow_private_urls,
         );
 
         let transport = (tokio::io::stdin(), tokio::io::stdout());
