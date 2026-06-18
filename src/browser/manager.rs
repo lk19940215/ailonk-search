@@ -80,8 +80,88 @@ impl BrowserManager {
         } else if args.headless {
             Self::launch_headless(args).await
         } else {
+            // Try chrome://inspect auto-connect first (Chrome 144+, uses main Chrome with all login states)
+            if let Some(bm) = Self::try_auto_connect(args).await {
+                return Ok(bm);
+            }
             Self::launch_user_chrome(args).await
         }
+    }
+
+    /// Try connecting via `chrome://inspect#remote-debugging` (Chrome/Edge 144+).
+    /// Reads `DevToolsActivePort` from the browser's default user data directory.
+    async fn try_auto_connect(args: &crate::cli::Args) -> Option<Self> {
+        for (name, dir) in Self::browser_data_dirs() {
+            let port_file = dir.join("DevToolsActivePort");
+            if !port_file.exists() {
+                continue;
+            }
+
+            let content = std::fs::read_to_string(&port_file).ok()?;
+            let mut lines = content.lines();
+            let port: u16 = match lines.next().and_then(|l| l.trim().parse().ok()) {
+                Some(p) if p > 0 => p,
+                _ => continue,
+            };
+            let ws_path = match lines.next() {
+                Some(p) if !p.trim().is_empty() => p.trim(),
+                _ => continue,
+            };
+
+            // Quick TCP check to see if the port is actually alive
+            if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await.is_err() {
+                tracing::debug!("{}: DevToolsActivePort exists but port {} is not listening (stale file)", name, port);
+                continue;
+            }
+
+            let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
+            tracing::info!(browser = name, port, "Found DevToolsActivePort, attempting auto-connect...");
+
+            let mut config = StealthConfig::live();
+            config.cdp_timeout = 30;
+
+            match Browser::connect_with_config(&ws_url, config).await {
+                Ok(browser) => {
+                    tracing::info!("Auto-connected to {} via DevToolsActivePort (port {})", name, port);
+                    return Some(Self::from_browser(browser, ConnectionMode::UserChrome, args.max_tabs, None));
+                }
+                Err(e) => {
+                    tracing::debug!("{}: auto-connect failed: {}", name, e);
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns candidate browser data directories (Chrome first, then Edge).
+    fn browser_data_dirs() -> Vec<(&'static str, std::path::PathBuf)> {
+        let mut dirs = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            #[cfg(target_os = "macos")]
+            {
+                let chrome = home.join("Library/Application Support/Google/Chrome");
+                if chrome.exists() { dirs.push(("Chrome", chrome)); }
+                let edge = home.join("Library/Application Support/Microsoft Edge");
+                if edge.exists() { dirs.push(("Edge", edge)); }
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let chrome = home.join(".config/google-chrome");
+                if chrome.exists() { dirs.push(("Chrome", chrome)); }
+                let edge = home.join(".config/microsoft-edge");
+                if edge.exists() { dirs.push(("Edge", edge)); }
+            }
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(local) = dirs::data_local_dir() {
+                    let chrome = local.join(r"Google\Chrome\User Data");
+                    if chrome.exists() { dirs.push(("Chrome", chrome)); }
+                    let edge = local.join(r"Microsoft\Edge\User Data");
+                    if edge.exists() { dirs.push(("Edge", edge)); }
+                }
+            }
+        }
+        dirs
     }
 
     async fn connect_remote(url: &str, max_tabs: usize) -> anyhow::Result<Self> {

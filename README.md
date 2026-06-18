@@ -12,7 +12,7 @@
 
 - **6 个 MCP 工具** — `search_and_read`（推荐）、`web_search`、`read_page`、`batch_read`、`screenshot`、`sync_login`
 - **反爬虫保护** — 基于 [eoka](https://crates.io/crates/eoka)：二进制补丁 + 指纹一致性 + 类人鼠标/键盘操作
-- **双运行模式** — **Headless**（零配置，适合服务器/CI）和 **UserChrome**（保留登录态、Cookie、扩展）
+- **三种运行模式** — **AutoConnect** ⭐（Chrome 144+，直接使用主浏览器所有登录态）、**UserChrome**（独立调试 Profile）、**Headless**（零配置）
 - **ML 正文提取** — [rs-trafilatura](https://crates.io/crates/rs-trafilatura) 支持 7 种页面类型（文章、博客、新闻、产品、论坛、文档、通用）
 - **智能等待** — 自动识别 SSR/静态页面 vs SPA/动态渲染页面，始终等待 network idle
 - **内容质量门控** — CAPTCHA/登录墙检测 + `rs-trafilatura` 质量评分，低质量内容标记 `[READ_FAILED]` 且不缓存
@@ -61,20 +61,20 @@ cargo install --path .
 
 ### 2. 选择运行模式
 
-> **重要**：未运行 `setup` 时，工具自动以 Headless 模式运行（无可见浏览器窗口）。
+| 模式 | 适用场景 | 配置步骤 | 登录态 |
+|------|---------|---------|--------|
+| **AutoConnect** ⭐ | 需要登录态（推荐，Chrome 144+） | 在 Chrome 中开启一个开关 | 主 Chrome 所有登录态即时可用 |
+| **UserChrome** | 需要登录态，但不想动主 Chrome | 运行 `setup` | 需手动登录或 `sync` |
+| **Headless**（默认 fallback） | 服务器、CI、快速体验 | 零配置 | 无 |
 
-| 模式 | 适用场景 | 是否需要 setup |
-|------|---------|---------------|
-| **Headless**（默认 fallback） | 服务器、CI、快速体验、零配置 | 不需要 |
-| **UserChrome** | 需要登录态的网站（GitHub、知乎、付费墙） | **需要先运行 `setup`** |
+**选择 AutoConnect 模式**（推荐，所有登录态即时可用）：
 
-**选择 Headless 模式**（零配置，直接跳到第 3 步）：
+1. 在 Chrome 中打开 `chrome://inspect/#remote-debugging`，勾选"启用远程调试"（一次性）
+2. 完成！ailonk-search 会自动连接你的主 Chrome
 
-```bash
-# 不需要任何额外操作，Headless 模式开箱即用
-```
+> 首次连接时 Chrome 会弹出权限对话框，点击"允许"即可。
 
-**选择 UserChrome 模式**（保留登录态、Cookie、扩展）：
+**选择 UserChrome 模式**（独立调试 Profile）：
 
 ```bash
 # npm 安装用户：
@@ -84,7 +84,13 @@ npx ailonk-search setup
 ailonk-search setup
 ```
 
-`setup` 会创建独立的调试 Chrome Profile（端口 19222），不影响正常浏览器使用。创建完成后，在该 Chrome 窗口中登录你需要的网站。登录态过期时可运行 `ailonk-search sync` 或通过 MCP 工具 `sync_login` 自动刷新。
+`setup` 会创建独立的调试 Chrome Profile（端口 19222），不影响正常浏览器使用。登录态过期时可运行 `ailonk-search sync` 或通过 MCP 工具 `sync_login` 自动刷新。
+
+**选择 Headless 模式**（零配置，直接跳到第 3 步）：
+
+```bash
+# 不需要任何额外操作，Headless 模式开箱即用
+```
 
 ### 3. 配置 MCP
 
@@ -195,6 +201,23 @@ ailonk-search setup
 
 ## 运行模式
 
+### AutoConnect 模式 ⭐（Chrome 144+）
+
+- 自动检测 Chrome 的 `DevToolsActivePort` 并通过 WebSocket 直连
+- **所有登录态即时可用**，无需 sync、无独立 Profile
+- 一次性配置：在 Chrome 中启用 `chrome://inspect/#remote-debugging`
+- 首次连接时 Chrome 弹出权限对话框（点击"允许"）
+- 默认引擎：**Google**（全球）或 **Bing cn**（中国）
+- 请求间隔：2 秒
+
+### UserChrome 模式
+
+- 连接（或启动）真实 Chrome 实例，使用 `~/.ailonk-search-profile` 独立配置
+- 通过 `sync` 命令或 MCP `sync_login` 工具从主 Chrome 同步登录态
+- 使用调试端口 **19222**，与正常 Chrome 共存
+- 默认引擎：**Google**（全球）或 **Bing cn**（中国）
+- 请求间隔：2 秒
+
 ### Headless 模式
 
 - 设置 `--headless` 时自动启用，或无 UserChrome Profile 时自动回退
@@ -203,19 +226,20 @@ ailonk-search setup
 - 默认引擎：**Bing**（Headless 下更可靠）
 - 请求间隔：5 秒
 
-### UserChrome 模式
+### 连接优先级
 
-- 连接（或启动）真实 Chrome 实例，使用 `~/.ailonk-search-profile` 独立配置
-- 通过 `sync` 命令或 MCP `sync_login` 工具从主 Chrome 同步登录态
-- 使用调试端口 **19222**，与正常 Chrome 共存
-- 适合：需要登录的网站、验证码频繁的页面、非中国区 Google 搜索
-- 默认引擎：**Google**（全球）或 **Bing cn**（中国）
-- 请求间隔：2 秒
+ailonk-search 按以下顺序尝试连接：
+
+1. `--remote-url`（显式指定）
+2. `DevToolsActivePort`（AutoConnect，Chrome 144+）
+3. 端口 19222（UserChrome，`setup` 创建的实例）
+4. 自动启动 Chrome（UserChrome 或 Headless fallback）
 
 | 场景 | 推荐模式 |
 |------|---------|
+| 需要登录态的网站 | **AutoConnect**（`chrome://inspect` 启用） |
+| 不想动主 Chrome | UserChrome（先运行 `setup`） |
 | 服务器 / CI / 快速体验 | Headless (`--headless`) |
-| 需要登录的网站（GitHub、知乎等） | UserChrome（先运行 `setup`） |
 | 中国大陆搜索 | UserChrome 或 `--region cn` |
 | 连接已有 Chrome | `--remote-url http://127.0.0.1:9222` |
 
