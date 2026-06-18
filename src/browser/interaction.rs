@@ -25,11 +25,16 @@ pub async fn navigate(page: &Page, url: &str, timeout_secs: u64) -> anyhow::Resu
     page.goto(url).await
         .map_err(|e| anyhow::anyhow!("Navigation failed for {}: {}", url, e))?;
 
-    // Wait for DOM + body first (fast, reliable), then attempt brief network idle.
-    // This avoids hanging on pages with long-running analytics/ad scripts.
     page.wait_for("body", timeout_secs * 1000).await.ok();
 
-    let idle_timeout = (timeout_secs * 1000).min(8000);
+    // Try common content container selectors for better readiness detection
+    for sel in &["article", "main", "[role='main']", ".content", "#content"] {
+        if page.wait_for(sel, 2000).await.is_ok() {
+            break;
+        }
+    }
+
+    let idle_timeout = (timeout_secs * 1000).min(6000);
     match page.wait_for_network_idle(500, idle_timeout).await {
         Ok(_) => {}
         Err(_) => {

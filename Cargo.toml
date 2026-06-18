@@ -15,9 +15,6 @@ eoka = "0.3"
 # --- Async ---
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
-
-# --- HTML 处理 ---
-dom_smoothie = { version = "0.18", features = ["serde"] }
 scraper = "0.27"
 
 # --- 序列化 ---
@@ -47,7 +44,7 @@ urlencoding = "2"
 url = "2"
 rand = "0.9"
 dirs = "6"
-regex = "1.12.4"
+rs-trafilatura = "0.2.2"
 
 [dev-dependencies]
 rmcp = { version = "1.7", features = ["client", "transport-child-process"] }
