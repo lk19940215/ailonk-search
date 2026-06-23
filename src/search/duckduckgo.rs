@@ -4,7 +4,9 @@ use eoka::Page;
 use crate::browser::interaction;
 use super::engine::{SearchEngine, SearchResult};
 
-pub struct DuckDuckGoEngine;
+pub struct DuckDuckGoEngine {
+    pub nav_timeout: u64,
+}
 
 const DDG_RESULTS_JS: &str = r#"
     (() => {
@@ -42,7 +44,7 @@ impl SearchEngine for DuckDuckGoEngine {
             urlencoding::encode(query),
         );
 
-        interaction::navigate(page, &url, 15).await?;
+        interaction::navigate(page, &url, self.nav_timeout).await?;
         page.wait_for_any(&[".result", ".web-result"], 10000).await.ok();
 
         match interaction::resolve_captcha_loop(page, 2).await {

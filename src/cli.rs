@@ -61,7 +61,7 @@ pub struct Args {
     #[arg(long, global = true)]
     pub chrome_path: Option<String>,
 
-    /// Default search engine: auto|google|bing
+    /// Default search engine: auto|google|bing|duckduckgo
     #[arg(long, default_value = "auto", global = true)]
     pub engine: String,
 
@@ -70,7 +70,7 @@ pub struct Args {
     pub region: String,
 
     /// Maximum concurrent tabs
-    #[arg(long, default_value = "5", global = true)]
+    #[arg(long, default_value = "5", value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..), global = true)]
     pub max_tabs: usize,
 
     /// Pass-through Chrome launch arguments (comma-separated)
@@ -78,7 +78,7 @@ pub struct Args {
     pub chrome_args: Option<String>,
 
     /// Cache TTL in seconds (0 to disable, default: disabled)
-    #[arg(long, default_value = "0")]
+    #[arg(long, default_value = "0", global = true)]
     pub cache_ttl: u64,
 
     /// Allow accessing private/internal URLs (127.0.0.1, 192.168.*, etc.)

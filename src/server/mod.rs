@@ -453,10 +453,19 @@ impl SearchServer {
         let (engine_name, search_results) = search_result.map_err(to_mcp_error)?;
 
         let read_count = params.read_count.clamp(1, 5).min(search_results.len());
+        let mut skipped_urls = vec![];
         let urls_to_read: Vec<String> = search_results
             .iter()
             .take(read_count)
-            .filter(|r| interaction::validate_url(&r.url, self.allow_private_urls).is_ok())
+            .filter(|r| {
+                if interaction::validate_url(&r.url, self.allow_private_urls).is_ok() {
+                    true
+                } else {
+                    tracing::debug!(url = %r.url, "Skipping invalid URL in search_and_read");
+                    skipped_urls.push(r.url.clone());
+                    false
+                }
+            })
             .map(|r| r.url.clone())
             .collect();
 
@@ -535,6 +544,13 @@ impl SearchServer {
             output.push_str(&format!("\n## Read Errors ({})\n\n", read_errors.len()));
             for (url, err) in &read_errors {
                 output.push_str(&format!("- {}: {}\n", url, err));
+            }
+        }
+
+        if !skipped_urls.is_empty() {
+            output.push_str(&format!("\n## Skipped URLs ({})\n\n", skipped_urls.len()));
+            for url in &skipped_urls {
+                output.push_str(&format!("- {}: invalid or private URL\n", url));
             }
         }
 

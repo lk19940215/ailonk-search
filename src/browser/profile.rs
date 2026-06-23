@@ -35,7 +35,7 @@ pub fn default_chrome_profile_dir() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {
         if let Some(local) = dirs::data_local_dir() {
-            let p = local.join(r"Google\\Chrome\\User Data");
+            let p = local.join(r"Google\Chrome\User Data");
             if p.exists() { return Some(p); }
         }
     }

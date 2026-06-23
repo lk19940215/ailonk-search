@@ -5,6 +5,7 @@ use crate::browser::interaction;
 use super::engine::{SearchEngine, SearchResult};
 
 pub struct GoogleEngine {
+    pub region: &'static str,
     pub nav_timeout: u64,
 }
 
@@ -57,10 +58,12 @@ impl SearchEngine for GoogleEngine {
         query: &str,
         count: usize,
     ) -> anyhow::Result<Vec<SearchResult>> {
+        let hl = if self.region == "cn" { "zh-CN" } else { "en" };
         let url = format!(
-            "https://www.google.com/search?q={}&num={}&hl=en",
+            "https://www.google.com/search?q={}&num={}&hl={}",
             urlencoding::encode(query),
-            count.min(20)
+            count.min(20),
+            hl,
         );
 
         interaction::navigate(page, &url, self.nav_timeout).await?;

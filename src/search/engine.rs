@@ -92,21 +92,53 @@ pub fn select_engine(
     };
     let effective = if matches!(choice, EngineChoice::Auto) {
         match cli_default {
-            "google" => return Box::new(super::google::GoogleEngine { nav_timeout: timeout }),
-            "bing" => return Box::new(super::bing::BingEngine { region, nav_timeout: timeout }),
+            "google" => {
+                return Box::new(super::google::GoogleEngine {
+                    region,
+                    nav_timeout: timeout,
+                });
+            }
+            "bing" => {
+                return Box::new(super::bing::BingEngine {
+                    region,
+                    nav_timeout: timeout,
+                });
+            }
+            "duckduckgo" => {
+                return Box::new(super::duckduckgo::DuckDuckGoEngine {
+                    nav_timeout: timeout,
+                });
+            }
             _ => choice,
         }
     } else {
         choice
     };
     match effective {
-        EngineChoice::Google => Box::new(super::google::GoogleEngine { nav_timeout: timeout }),
-        EngineChoice::Bing => Box::new(super::bing::BingEngine { region, nav_timeout: timeout }),
-        EngineChoice::Duckduckgo => Box::new(super::duckduckgo::DuckDuckGoEngine),
+        EngineChoice::Google => Box::new(super::google::GoogleEngine {
+            region,
+            nav_timeout: timeout,
+        }),
+        EngineChoice::Bing => Box::new(super::bing::BingEngine {
+            region,
+            nav_timeout: timeout,
+        }),
+        EngineChoice::Duckduckgo => Box::new(super::duckduckgo::DuckDuckGoEngine {
+            nav_timeout: timeout,
+        }),
         EngineChoice::Auto => match (connection_mode, region) {
-            (ConnectionMode::UserChrome, "cn") => Box::new(super::bing::BingEngine { region, nav_timeout: timeout }),
-            (ConnectionMode::UserChrome, _) => Box::new(super::google::GoogleEngine { nav_timeout: timeout }),
-            (ConnectionMode::Headless, _) => Box::new(super::bing::BingEngine { region, nav_timeout: timeout }),
+            (ConnectionMode::UserChrome, "cn") => Box::new(super::bing::BingEngine {
+                region,
+                nav_timeout: timeout,
+            }),
+            (ConnectionMode::UserChrome, _) => Box::new(super::google::GoogleEngine {
+                region,
+                nav_timeout: timeout,
+            }),
+            (ConnectionMode::Headless, _) => Box::new(super::bing::BingEngine {
+                region,
+                nav_timeout: timeout,
+            }),
         },
     }
 }
@@ -225,7 +257,10 @@ pub async fn search_with_fallback(
     let fallback: Option<Box<dyn SearchEngine>> = match (primary_name.as_str(), fallback_mode) {
         ("google", _) => Some(Box::new(super::bing::BingEngine { region, nav_timeout: fb_timeout })),
         ("duckduckgo", _) => Some(Box::new(super::bing::BingEngine { region, nav_timeout: fb_timeout })),
-        ("bing", _) => Some(Box::new(super::google::GoogleEngine { nav_timeout: fb_timeout })),
+        ("bing", _) => Some(Box::new(super::google::GoogleEngine {
+            region,
+            nav_timeout: fb_timeout,
+        })),
         _ => None,
     };
 

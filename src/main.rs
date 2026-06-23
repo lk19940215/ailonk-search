@@ -7,11 +7,15 @@ mod search;
 mod extract;
 
 use clap::Parser;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter("ailonk_search=info")
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("ailonk_search=info")),
+        )
         .with_writer(std::io::stderr)
         .init();
 

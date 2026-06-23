@@ -293,18 +293,34 @@ impl BrowserManager {
             .stderr(std::process::Stdio::null());
 
         tracing::info!("Launching Chrome with user profile: {}", profile_dir.display());
-        let child = cmd.spawn()
+        let mut child = cmd.spawn()
             .map_err(|e| anyhow::anyhow!("Failed to launch Chrome at {}: {}", chrome_path, e))?;
 
-        let ws_url = wait_for_debug_port(port, 10).await
-            .map_err(|e| anyhow::anyhow!("Chrome 启动超时 (port {}): {}", port, e))?;
+        let ws_url = match wait_for_debug_port(port, 10).await {
+            Ok(url) => url,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow::anyhow!("Chrome 启动超时 (port {}): {}", port, e));
+            }
+        };
 
         tracing::info!(ws_url = %ws_url, "Chrome ready, connecting via WebSocket...");
 
         let mut config = StealthConfig::live();
         config.cdp_timeout = 60;
-        let browser = Browser::connect_with_config(ws_url.trim(), config).await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Chrome (url={}): {}", ws_url.trim(), e))?;
+        let browser = match Browser::connect_with_config(ws_url.trim(), config).await {
+            Ok(browser) => browser,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow::anyhow!(
+                    "Failed to connect to Chrome (url={}): {}",
+                    ws_url.trim(),
+                    e
+                ));
+            }
+        };
 
         tracing::info!("Connected to user Chrome (with login state)");
         Ok(Self::from_browser(browser, ConnectionMode::UserChrome, args.max_tabs, Some(child), Some(ws_url.trim().to_string())))
