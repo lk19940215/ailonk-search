@@ -14,7 +14,7 @@
 - **反爬虫保护** — 基于 [eoka](https://crates.io/crates/eoka)：二进制补丁 + 指纹一致性 + 类人鼠标/键盘操作
 - **三种运行模式** — **AutoConnect** ⭐（Chrome 144+，直接使用主浏览器所有登录态）、**UserChrome**（独立调试 Profile）、**Headless**（零配置）
 - **ML 正文提取** — [rs-trafilatura](https://crates.io/crates/rs-trafilatura) 支持 7 种页面类型（文章、博客、新闻、产品、论坛、文档、通用）
-- **智能等待** — 自动识别 SSR/静态页面 vs SPA/动态渲染页面，始终等待 network idle
+- **智能等待** — network idle + MutationObserver DOM 稳定检测，精确等待 SPA 渲染完成
 - **内容质量门控** — CAPTCHA/登录墙检测 + `rs-trafilatura` 质量评分，低质量内容标记 `[READ_FAILED]` 且不缓存
 - **Tab 池 + 缓存** — 信号量限制并发 Tab 数 + [moka](https://crates.io/crates/moka) 内容缓存（默认禁用，可通过 `--cache-ttl` 启用）
 - **懒加载 Chrome** — 首次工具调用时才启动浏览器，`tools/list` 不触发启动

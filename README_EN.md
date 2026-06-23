@@ -15,7 +15,7 @@
 - **Three connection modes** — **AutoConnect** ⭐ (Chrome 144+, uses main browser with all login state), **UserChrome** (dedicated debug profile), **Headless** (zero-config)
 - **ML content extraction** — [rs-trafilatura](https://crates.io/crates/rs-trafilatura) extracts main content across 7 page types (article, blog, news, product, forum, documentation, generic)
 - **Content quality gating** — CAPTCHA/login-wall detection + quality scoring; low-quality pages marked `[READ_FAILED]` and not cached
-- **Smart page loading** — detects SSR vs SPA pages and waits accordingly (DOM content check → network idle fallback)
+- **Smart page loading** — network idle + MutationObserver-based DOM stability detection for precise SPA render completion
 - **Tab pool + caching** — semaphore-limited concurrent tabs with [moka](https://crates.io/crates/moka) content cache (disabled by default, enable with `--cache-ttl`)
 - **Lazy Chrome init** — Chrome starts on the first tool call, not on `tools/list` (fast MCP handshake)
 - **Auto-reconnect** — detects CDP disconnection and automatically reconnects on next tool call
