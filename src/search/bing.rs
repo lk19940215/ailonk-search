@@ -117,9 +117,7 @@ impl SearchEngine for BingEngine {
 
         interaction::handle_consent(page, "bing").await?;
 
-        // Wait for results
         page.wait_for_any(&["li.b_algo", ".b_algo", "#b_results"], 15000).await.ok();
-        page.wait(500).await;
 
         // CAPTCHA check
         match interaction::resolve_captcha_loop(page, 2).await {

@@ -109,8 +109,6 @@ pub async fn run_all(args: &crate::cli::Args) -> anyhow::Result<()> {
                 let tab = browser_manager.tab_pool().acquire().await?;
                 let result = async {
                     interaction::navigate(tab.page(), url, 15).await?;
-                    tab.page().wait_for("body", 5000).await.ok();
-                    tab.page().wait(1000).await;
                     tab.page().content().await
                         .map_err(|e| anyhow::anyhow!("Content fetch failed: {}", e))
                 }.await;
@@ -256,8 +254,6 @@ pub async fn run_search_and_read(
             async {
                 let r = async {
                     interaction::navigate(tab.page(), url, 15).await?;
-                    tab.page().wait_for("body", 5000).await.ok();
-                    tab.page().wait(1000).await;
                     tab.page().content().await
                         .map_err(|e| anyhow::anyhow!("Content fetch: {}", e))
                 }.await;
@@ -316,8 +312,6 @@ pub async fn run_read(
     use crate::browser::interaction;
     let result = async {
         interaction::navigate(tab.page(), url, 15).await?;
-        tab.page().wait_for("body", 5000).await.ok();
-        tab.page().wait(1000).await;
         tab.page().content().await
             .map_err(|e| anyhow::anyhow!("Content fetch: {}", e))
     }.await;

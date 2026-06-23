@@ -44,14 +44,36 @@ impl SearchEngine for DuckDuckGoEngine {
 
         interaction::navigate(page, &url, 15).await?;
         page.wait_for_any(&[".result", ".web-result"], 10000).await.ok();
-        page.wait(500).await;
 
-        let title = page.title().await.unwrap_or_default();
-        if title.is_empty() || title.to_lowercase().contains("blocked") {
-            anyhow::bail!("DuckDuckGo appears to have blocked the request");
+        match interaction::resolve_captcha_loop(page, 2).await {
+            Ok(true) => {
+                page.wait(1500).await;
+                page.wait_for_any(&[".result", ".web-result"], 10000).await.ok();
+            }
+            Err(e) => return Err(e),
+            Ok(false) => {}
         }
 
-        let results: Vec<SearchResult> = interaction::extract(page, DDG_RESULTS_JS).await?;
+        let mut results: Vec<SearchResult> = interaction::extract(page, DDG_RESULTS_JS).await?;
+
+        if results.is_empty() {
+            let title = page.title().await.unwrap_or_default();
+            if title.is_empty() || title.to_lowercase().contains("blocked") {
+                anyhow::bail!("DuckDuckGo appears to have blocked the request");
+            }
+            if interaction::is_captcha_present(page).await {
+                match interaction::resolve_captcha_loop(page, 1).await {
+                    Ok(true) => {
+                        page.wait(1500).await;
+                        page.wait_for_any(&[".result", ".web-result"], 10000).await.ok();
+                        results = interaction::extract(page, DDG_RESULTS_JS).await?;
+                    }
+                    Err(e) => return Err(e),
+                    Ok(false) => {}
+                }
+            }
+        }
+
         Ok(results.into_iter().take(count).collect())
     }
 }

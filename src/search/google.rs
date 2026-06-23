@@ -66,7 +66,6 @@ impl SearchEngine for GoogleEngine {
         interaction::navigate(page, &url, self.nav_timeout).await?;
         interaction::handle_consent(page, "google").await?;
         page.wait_for_any(&["div.g", "#search", "#rso"], 10000).await.ok();
-        page.wait(500).await;
 
         match interaction::resolve_captcha_loop(page, 2).await {
             Ok(true) => {

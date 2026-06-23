@@ -103,6 +103,52 @@ fn is_fatal_cdp_error_anyhow(err: &anyhow::Error) -> bool {
     is_fatal_cdp_error(&err.to_string())
 }
 
+/// Shared read logic: acquire tab → navigate → CAPTCHA → extract content.
+/// Used by batch_read and search_and_read to eliminate code duplication.
+async fn fetch_and_extract(
+    bm: &BrowserManager,
+    url: &str,
+    max_len: usize,
+    cache: &ContentCache,
+) -> anyhow::Result<crate::extract::content::ExtractedContent> {
+    let tab = bm.tab_pool().acquire().await?;
+    let page_result = async {
+        interaction::navigate(tab.page(), url, 15).await?;
+        if interaction::is_captcha_present(tab.page()).await {
+            tracing::warn!(url = %url, "CAPTCHA detected");
+            match interaction::resolve_captcha_loop(tab.page(), 1).await {
+                Ok(_) => {
+                    let _ = tab.page().wait_for_network_idle(500, 3000).await;
+                }
+                Err(_) => anyhow::bail!("[READ_FAILED] CAPTCHA unresolved"),
+            }
+        }
+        tab.page().content().await
+            .map_err(|e| anyhow::anyhow!("Content fetch failed: {}", e))
+    }.await;
+    tab.close().await;
+    if let Err(ref e) = page_result {
+        if is_fatal_cdp_error_anyhow(e) {
+            bm.mark_unhealthy();
+        }
+    }
+    let html = page_result?;
+    if html.is_empty() {
+        anyhow::bail!("Empty content");
+    }
+    let extracted = crate::extract::content::ContentExtractor::extract(&html, url, max_len)?;
+    if extracted.is_low_quality() {
+        let reason = extracted.low_quality_reason().unwrap_or("unknown");
+        anyhow::bail!("[READ_FAILED] {} (quality: {:.2})", reason, extracted.quality);
+    }
+    let cache_key = ContentCache::key(url, true, max_len);
+    cache.insert(
+        cache_key,
+        CachedContent { title: extracted.title.clone(), content: extracted.content.clone() },
+    ).await;
+    Ok(extracted)
+}
+
 impl SearchServer {
 
     async fn rate_limiter(&self, bm: &BrowserManager) -> &Arc<RateLimiter> {
@@ -200,13 +246,15 @@ impl SearchServer {
             tab.close().await;
             return Err(nav_result.unwrap_err());
         }
-        tab.page().wait(500).await;
 
         if interaction::is_captcha_present(tab.page()).await {
             tracing::warn!(url = %params.url, "CAPTCHA detected, attempting resolve...");
             match interaction::resolve_captcha_loop(tab.page(), 1).await {
-                Ok(true) => tracing::info!("CAPTCHA resolved"),
-                _ => {
+                Ok(_) => {
+                    tracing::info!("CAPTCHA resolved");
+                    let _ = tab.page().wait_for_network_idle(500, 3000).await;
+                }
+                Err(_) => {
                     tracing::warn!("CAPTCHA could not be resolved");
                     tab.close().await;
                     let text = format!(
@@ -303,61 +351,11 @@ impl SearchServer {
 
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
-                    async {
-                        let tab = bm.tab_pool().acquire().await?;
-                        let page_result = async {
-                            interaction::navigate(tab.page(), &url, 15).await?;
-                            tab.page().wait(500).await;
-
-                            if interaction::is_captcha_present(tab.page()).await {
-                                tracing::warn!(url = %url, "CAPTCHA detected in batch_read");
-                                match interaction::resolve_captcha_loop(tab.page(), 1).await {
-                                    Ok(true) => {}
-                                    _ => anyhow::bail!("[READ_FAILED] CAPTCHA unresolved"),
-                                }
-                            }
-
-                            tab.page().content().await
-                                .map_err(|e| anyhow::anyhow!("Content fetch failed: {}", e))
-                        }.await;
-                        tab.close().await;
-
-                        if let Err(ref e) = page_result {
-                            if is_fatal_cdp_error_anyhow(e) {
-                                bm.mark_unhealthy();
-                            }
-                        }
-                        let html = page_result?;
-
-                        if html.is_empty() {
-                            anyhow::bail!("Empty content");
-                        }
-
-                        let extracted = crate::extract::content::ContentExtractor::extract(
-                            &html, &url, max_len,
-                        )?;
-
-                        if extracted.is_low_quality() {
-                            let reason = extracted.low_quality_reason().unwrap_or("unknown");
-                            anyhow::bail!(
-                                "[READ_FAILED] {} (quality: {:.2})",
-                                reason, extracted.quality
-                            );
-                        }
-
-                        cache.insert(
-                            cache_key,
-                            CachedContent {
-                                title: extracted.title.clone(),
-                                content: extracted.content.clone(),
-                            },
-                        ).await;
-
-                        Ok::<String, anyhow::Error>(format!("# {}\n\n{}", extracted.title, extracted.content))
-                    },
+                    fetch_and_extract(&bm, &url, max_len, &cache),
                 )
                 .await
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("Page read timeout after 30s")));
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Page read timeout after 30s")))
+                .map(|ex| format!("# {}\n\n{}", ex.title, ex.content));
 
                 (url, result)
             }));
@@ -487,57 +485,11 @@ impl SearchServer {
 
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
-                    async {
-                        let tab = bm.tab_pool().acquire().await?;
-                        let page_result = async {
-                            interaction::navigate(tab.page(), &url, 15).await?;
-                            tab.page().wait(500).await;
-
-                            if interaction::is_captcha_present(tab.page()).await {
-                                tracing::warn!(url = %url, "CAPTCHA detected in search_and_read");
-                                match interaction::resolve_captcha_loop(tab.page(), 1).await {
-                                    Ok(true) => {}
-                                    _ => anyhow::bail!("[READ_FAILED] CAPTCHA unresolved"),
-                                }
-                            }
-
-                            tab.page().content().await
-                                .map_err(|e| anyhow::anyhow!("Content fetch failed: {}", e))
-                        }.await;
-                        tab.close().await;
-
-                        if let Err(ref e) = page_result {
-                            if is_fatal_cdp_error_anyhow(e) {
-                                bm.mark_unhealthy();
-                            }
-                        }
-                        let html = page_result?;
-
-                        let extracted = crate::extract::content::ContentExtractor::extract(
-                            &html, &url, max_len,
-                        )?;
-
-                        if extracted.is_low_quality() {
-                            let reason = extracted.low_quality_reason().unwrap_or("unknown");
-                            return Err(anyhow::anyhow!(
-                                "[READ_FAILED] {} (quality: {:.2})",
-                                reason, extracted.quality
-                            ));
-                        }
-
-                        cache.insert(
-                            cache_key,
-                            CachedContent {
-                                title: extracted.title.clone(),
-                                content: extracted.content.clone(),
-                            },
-                        ).await;
-
-                        Ok(extracted.content)
-                    },
+                    fetch_and_extract(&bm, &url, max_len, &cache),
                 )
                 .await
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("Page read timeout after 30s")));
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Page read timeout after 30s")))
+                .map(|ex| ex.content);
 
                 (url, result)
             }));
@@ -610,7 +562,6 @@ impl SearchServer {
 
         let result = async {
             interaction::navigate(tab.page(), &params.url, 15).await.map_err(to_mcp_error)?;
-            tab.page().wait(500).await;
 
             let data = match format_str.as_str() {
                 "jpeg" | "jpg" => {
