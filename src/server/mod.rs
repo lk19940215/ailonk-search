@@ -656,12 +656,27 @@ impl ServerHandler for SearchServer {
                 2. web_search — when you only need titles/URLs/snippets, no full content.\n\
                 3. read_page — read a specific URL you already have (max_length up to 15000).\n\
                 4. batch_read — read multiple known URLs concurrently (up to 10).\n\
+                5. screenshot — visual capture only; prefer read_page for text.\n\
+                6. sync_login — refresh browser login state from user's Chrome when pages return [READ_FAILED] due to auth.\n\
+                \n\
+                QUERY CRAFTING:\n\
+                - Be specific: include entity names, versions, dates. Good: 'SpaceX IPO 2026 pricing'. Bad: 'SpaceX news'.\n\
+                - Match query language to target content: Chinese topics → Chinese keywords, English docs → English keywords.\n\
+                - Include the current year for time-sensitive queries (e.g. '2026 AI model benchmark').\n\
+                - One intent per query — never combine unrelated subtopics in a single search.\n\
+                - Use search operators when needed: \"exact phrase\", site:domain.com, -exclude_term.\n\
+                - Max query length: 500 characters.\n\
                 \n\
                 SEARCH STRATEGY:\n\
-                - For multi-topic queries (e.g. comparing 4 companies), split into separate searches per topic. \
-                Broad queries tend to be dominated by one subtopic.\n\
+                - For multi-topic queries (e.g. comparing 4 companies), split into separate searches per topic.\n\
                 - For deep research, use multiple rounds: first broad, then targeted follow-ups with refined keywords.\n\
                 - Cross-verify key facts across rounds for accuracy.\n\
+                \n\
+                ENGINE SELECTION:\n\
+                - auto (default): best engine based on region. Usually optimal.\n\
+                - bing: stable for Chinese content, use when Google is unreliable.\n\
+                - google: best for English technical docs and global content.\n\
+                - duckduckgo: for privacy-sensitive queries or when other engines hit CAPTCHAs.\n\
                 \n\
                 PARAMETER GUIDE:\n\
                 - read_count: 1-2 for quick overview, 3 for standard research, 4-5 for deep investigation.\n\

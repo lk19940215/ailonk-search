@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WebSearchParams {
-    /// The search query string, e.g. 'Rust async programming'
+    /// Search query. Be specific: include entity names, versions, years. E.g. 'Rust tokio 2026 tutorial', 'SpaceX IPO 2026 pricing'. Match language to target content. Max 500 chars.
     pub query: String,
     /// Search engine to use. 'auto' selects best engine based on region (default). Options: auto, google, bing, duckduckgo
     #[serde(default)]
@@ -87,7 +87,7 @@ pub struct ScreenshotParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchAndReadParams {
-    /// The search query string
+    /// Search query. Be specific: include entity names, versions, years. E.g. 'DeepSeek V4 benchmark results', 'React 19 server components guide'. Match language to target content. Max 500 chars.
     pub query: String,
     /// Search engine to use (default: auto)
     #[serde(default)]
