@@ -78,49 +78,39 @@ pub fn validate_file_path(path: &str) -> anyhow::Result<()> {
 /// Strategy:
 /// 1. goto (waits for load event internally)
 /// 2. Wait for body element
-/// 3. Wait for network idle (8s timeout — covers both SSR and SPA API calls)
-/// 4. If content is still minimal (<200 chars), poll for SPA rendering completion
+/// 3. Wait for network idle (covers API calls for SPAs)
+/// 4. If content is still minimal, use MutationObserver to wait for DOM stability
+///    (200ms of no DOM changes = rendering complete)
 pub async fn navigate(page: &Page, url: &str, timeout_secs: u64) -> anyhow::Result<()> {
     page.goto(url).await
         .map_err(|e| anyhow::anyhow!("Navigation failed for {}: {}", url, e))?;
 
     page.wait_for("body", timeout_secs * 1000).await.ok();
 
-    match page.wait_for_network_idle(500, 8000).await {
-        Ok(_) => {}
-        Err(_) => {
-            tracing::debug!(url, "Network not fully idle after 8s, proceeding");
-        }
-    }
+    let _ = page.wait_for_network_idle(500, 8000).await;
 
     let text_len: usize = page
-        .evaluate("(document.body.innerText || '').length")
+        .evaluate_sync("(document.body.innerText || '').length")
         .await
         .unwrap_or(0);
 
     if text_len < 200 {
-        tracing::debug!(url, text_len, "Content minimal after network idle, waiting for SPA render");
-        let mut last_len = text_len;
-        for round in 1..=4 {
-            page.wait(1500).await;
-            let new_len: usize = page
-                .evaluate("(document.body.innerText || '').length")
-                .await
-                .unwrap_or(0);
-            if new_len > 200 {
-                tracing::debug!(url, new_len, round, "SPA content appeared");
-                let _ = page.wait_for_network_idle(500, 3000).await;
-                break;
-            }
-            if new_len <= last_len {
-                break;
-            }
-            last_len = new_len;
-        }
+        tracing::debug!(url, text_len, "Content minimal, waiting for DOM mutation-idle");
+        let _: bool = page.evaluate(MUTATION_IDLE_JS).await.unwrap_or(true);
+        let _ = page.wait_for_network_idle(500, 3000).await;
     }
 
     Ok(())
 }
+
+/// JS Promise that resolves when the DOM stabilizes (200ms of no mutations),
+/// with an 8s safety timeout. Uses MutationObserver for precise SPA render detection.
+const MUTATION_IDLE_JS: &str = r#"new Promise(r=>{
+let t=setTimeout(()=>r(!0),200);
+const o=new MutationObserver(()=>{clearTimeout(t);t=setTimeout(()=>{o.disconnect();r(!0)},200)});
+o.observe(document.body,{childList:!0,subtree:!0,characterData:!0});
+setTimeout(()=>{o.disconnect();r(!0)},8000)
+})"#;
 
 pub async fn extract<T: serde::de::DeserializeOwned>(
     page: &Page,
