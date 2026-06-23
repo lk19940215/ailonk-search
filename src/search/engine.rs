@@ -62,6 +62,21 @@ pub fn detect_region(cli_region: &str) -> &'static str {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "(Get-Culture).Name"])
+            .output()
+        {
+            if output.status.success() {
+                let culture = String::from_utf8_lossy(&output.stdout).to_lowercase();
+                if culture.starts_with("zh-cn") || culture.starts_with("zh-hans") {
+                    return "cn";
+                }
+            }
+        }
+    }
+
     "global"
 }
 

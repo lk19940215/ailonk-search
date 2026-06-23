@@ -78,28 +78,47 @@ pub fn validate_file_path(path: &str) -> anyhow::Result<()> {
 /// Strategy:
 /// 1. goto (waits for load event internally)
 /// 2. Wait for body element
-/// 3. Quick check: if DOM already has substantial text (SSR/static), skip network idle
-/// 4. Otherwise wait for network idle (needed for SPA/JS-rendered pages)
+/// 3. Wait for network idle (8s timeout — covers both SSR and SPA API calls)
+/// 4. If content is still minimal (<200 chars), poll for SPA rendering completion
 pub async fn navigate(page: &Page, url: &str, timeout_secs: u64) -> anyhow::Result<()> {
     page.goto(url).await
         .map_err(|e| anyhow::anyhow!("Navigation failed for {}: {}", url, e))?;
 
     page.wait_for("body", timeout_secs * 1000).await.ok();
 
-    let has_content: bool = page
-        .evaluate("(document.body.innerText || '').length > 200")
-        .await
-        .unwrap_or(false);
-
-    // Always wait for network idle — SPAs (e.g. TAPD) may have nav/sidebar text > 200
-    // but still be loading main content via API. Use shorter timeout when content exists.
-    let idle_timeout = if has_content { 3000 } else { 6000 };
-    match page.wait_for_network_idle(500, idle_timeout).await {
+    match page.wait_for_network_idle(500, 8000).await {
         Ok(_) => {}
         Err(_) => {
-            tracing::debug!(url, "Network not fully idle, proceeding with current DOM");
+            tracing::debug!(url, "Network not fully idle after 8s, proceeding");
         }
     }
+
+    let text_len: usize = page
+        .evaluate("(document.body.innerText || '').length")
+        .await
+        .unwrap_or(0);
+
+    if text_len < 200 {
+        tracing::debug!(url, text_len, "Content minimal after network idle, waiting for SPA render");
+        let mut last_len = text_len;
+        for round in 1..=4 {
+            page.wait(1500).await;
+            let new_len: usize = page
+                .evaluate("(document.body.innerText || '').length")
+                .await
+                .unwrap_or(0);
+            if new_len > 200 {
+                tracing::debug!(url, new_len, round, "SPA content appeared");
+                let _ = page.wait_for_network_idle(500, 3000).await;
+                break;
+            }
+            if new_len <= last_len {
+                break;
+            }
+            last_len = new_len;
+        }
+    }
+
     Ok(())
 }
 

@@ -16,7 +16,7 @@
 - **ML 正文提取** — [rs-trafilatura](https://crates.io/crates/rs-trafilatura) 支持 7 种页面类型（文章、博客、新闻、产品、论坛、文档、通用）
 - **智能等待** — 自动识别 SSR/静态页面 vs SPA/动态渲染页面，始终等待 network idle
 - **内容质量门控** — CAPTCHA/登录墙检测 + `rs-trafilatura` 质量评分，低质量内容标记 `[READ_FAILED]` 且不缓存
-- **Tab 池 + 缓存** — 信号量限制并发 Tab 数 + [moka](https://crates.io/crates/moka) 内容缓存（默认 TTL 300s）
+- **Tab 池 + 缓存** — 信号量限制并发 Tab 数 + [moka](https://crates.io/crates/moka) 内容缓存（默认禁用，可通过 `--cache-ttl` 启用）
 - **懒加载 Chrome** — 首次工具调用时才启动浏览器，`tools/list` 不触发启动
 - **多搜索引擎** — Google、Bing、DuckDuckGo，中国区自动选择 cn.bing.com
 - **自动检测浏览器** — 支持 Google Chrome、Microsoft Edge、Chromium（macOS/Linux/Windows）
@@ -181,7 +181,7 @@ ailonk-search setup
 | `--region` | `auto` | 搜索区域：`auto`（自动检测）、`cn`（中国大陆）、`global` |
 | `--max-tabs` | `5` | 最大并发 Tab 数 |
 | `--chrome-args` | — | 额外 Chrome 启动参数（逗号分隔） |
-| `--cache-ttl` | `300` | 内容缓存 TTL（秒），`0` 禁用 |
+| `--cache-ttl` | `0` | 内容缓存 TTL（秒），`0` 禁用，推荐 `300` 启用 |
 | `--allow-private-urls` | false | 允许访问内网/本地 URL（127.0.0.1、192.168.* 等） |
 
 ### 子命令

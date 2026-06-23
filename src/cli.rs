@@ -77,8 +77,8 @@ pub struct Args {
     #[arg(long, global = true)]
     pub chrome_args: Option<String>,
 
-    /// Cache TTL in seconds (0 to disable)
-    #[arg(long, default_value = "300")]
+    /// Cache TTL in seconds (0 to disable, default: disabled)
+    #[arg(long, default_value = "0")]
     pub cache_ttl: u64,
 
     /// Allow accessing private/internal URLs (127.0.0.1, 192.168.*, etc.)

@@ -9,6 +9,9 @@ const DEBUG_PORT: u16 = 19222;
 pub struct LazyBrowserManager {
     args: crate::cli::Args,
     inner: RwLock<Option<Arc<BrowserManager>>>,
+    /// Cached WebSocket URL from a successful connection (AutoConnect or UserChrome),
+    /// reused on reconnect to avoid re-scanning DevToolsActivePort and Chrome auth popups.
+    cached_ws_url: RwLock<Option<String>>,
 }
 
 impl LazyBrowserManager {
@@ -16,6 +19,7 @@ impl LazyBrowserManager {
         Arc::new(Self {
             args: args.clone(),
             inner: RwLock::new(None),
+            cached_ws_url: RwLock::new(None),
         })
     }
 
@@ -45,7 +49,19 @@ impl LazyBrowserManager {
         }
 
         tracing::info!("Initializing Chrome...");
-        let bm = BrowserManager::new(&self.args).await?;
+        let cached_url = self.cached_ws_url.read().await.clone();
+        let bm = BrowserManager::new_with_cache(&self.args, cached_url.as_deref()).await?;
+
+        {
+            let mut cache = self.cached_ws_url.write().await;
+            if let Some(url) = &bm.connected_ws_url {
+                *cache = Some(url.clone());
+            } else if cached_url.is_some() {
+                *cache = None;
+                tracing::debug!("Cleared stale cached WS URL");
+            }
+        }
+
         let bm = Arc::new(bm);
         *guard = Some(bm.clone());
         Ok(bm)
@@ -71,21 +87,70 @@ pub struct BrowserManager {
     tab_pool: TabPool,
     chrome_child: std::sync::Mutex<Option<std::process::Child>>,
     healthy: Arc<std::sync::atomic::AtomicBool>,
+    /// The WebSocket URL used for this connection (AutoConnect, UserChrome, or cached reconnect).
+    pub(crate) connected_ws_url: Option<String>,
 }
 
 impl BrowserManager {
     pub async fn new(args: &crate::cli::Args) -> anyhow::Result<Self> {
+        Self::new_with_cache(args, None).await
+    }
+
+    pub async fn new_with_cache(args: &crate::cli::Args, cached_ws_url: Option<&str>) -> anyhow::Result<Self> {
         if let Some(ref url) = args.remote_url {
             Self::connect_remote(url, args.max_tabs).await
         } else if args.headless {
             Self::launch_headless(args).await
         } else {
-            // Try chrome://inspect auto-connect first (Chrome 144+, uses main Chrome with all login states)
+            // On reconnect, try cached WS URL first to avoid triggering Chrome's auth popup
+            if let Some(url) = cached_ws_url {
+                if let Some(bm) = Self::try_cached_connect(url, args.max_tabs).await {
+                    return Ok(bm);
+                }
+                tracing::debug!("Cached WS URL reconnect failed, falling back to full connect");
+            }
+
+            // If debug profile exists, probe port 19222 before scanning DevToolsActivePort
+            if super::profile::debug_profile_dir().exists() {
+                if let Some(bm) = Self::try_debug_port_connect(DEBUG_PORT, args.max_tabs).await {
+                    return Ok(bm);
+                }
+            }
+
             if let Some(bm) = Self::try_auto_connect(args).await {
                 return Ok(bm);
             }
             Self::launch_user_chrome(args).await
         }
+    }
+
+    /// Reconnect using a previously successful WebSocket URL (skips DevToolsActivePort scan).
+    async fn try_cached_connect(ws_url: &str, max_tabs: usize) -> Option<Self> {
+        tracing::info!("Attempting reconnect via cached WS URL...");
+
+        let mut config = StealthConfig::live();
+        config.cdp_timeout = 30;
+
+        match Browser::connect_with_config(ws_url, config).await {
+            Ok(browser) => {
+                tracing::info!("Reconnected via cached WS URL");
+                Some(Self::from_browser(browser, ConnectionMode::UserChrome, max_tabs, None, Some(ws_url.to_string())))
+            }
+            Err(e) => {
+                tracing::debug!("Cached WS URL reconnect failed: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Fast probe: try connecting to an existing debug Chrome on a known port.
+    async fn try_debug_port_connect(port: u16, max_tabs: usize) -> Option<Self> {
+        let ws_url = wait_for_debug_port(port, 1).await.ok()?;
+        let mut config = StealthConfig::live();
+        config.cdp_timeout = 10;
+        let browser = Browser::connect_with_config(&ws_url, config).await.ok()?;
+        tracing::info!(port, "Connected via debug port (fast probe)");
+        Some(Self::from_browser(browser, ConnectionMode::UserChrome, max_tabs, None, Some(ws_url)))
     }
 
     /// Try connecting via `chrome://inspect#remote-debugging` (Chrome/Edge 144+).
@@ -123,7 +188,7 @@ impl BrowserManager {
             match Browser::connect_with_config(&ws_url, config).await {
                 Ok(browser) => {
                     tracing::info!("Auto-connected to {} via DevToolsActivePort (port {})", name, port);
-                    return Some(Self::from_browser(browser, ConnectionMode::UserChrome, args.max_tabs, None));
+                    return Some(Self::from_browser(browser, ConnectionMode::UserChrome, args.max_tabs, None, Some(ws_url)));
                 }
                 Err(e) => {
                     tracing::debug!("{}: auto-connect failed: {}", name, e);
@@ -170,7 +235,7 @@ impl BrowserManager {
         let browser = Browser::connect_with_config(url, config).await
             .map_err(|e| anyhow::anyhow!("Failed to connect to Chrome at {}: {}", url, e))?;
         tracing::info!("Connected to existing Chrome at {}", url);
-        Ok(Self::from_browser(browser, ConnectionMode::UserChrome, max_tabs, None))
+        Ok(Self::from_browser(browser, ConnectionMode::UserChrome, max_tabs, None, None))
     }
 
     async fn launch_user_chrome(args: &crate::cli::Args) -> anyhow::Result<Self> {
@@ -196,7 +261,7 @@ impl BrowserManager {
             config.cdp_timeout = 60;
             let browser = Browser::connect_with_config(&ws_url, config).await
                 .map_err(|e| anyhow::anyhow!("Failed to connect to existing Chrome: {}", e))?;
-            return Ok(Self::from_browser(browser, ConnectionMode::UserChrome, args.max_tabs, None));
+            return Ok(Self::from_browser(browser, ConnectionMode::UserChrome, args.max_tabs, None, Some(ws_url)));
         }
 
         let mut cmd = std::process::Command::new(&chrome_path);
@@ -242,7 +307,7 @@ impl BrowserManager {
             .map_err(|e| anyhow::anyhow!("Failed to connect to Chrome (url={}): {}", ws_url.trim(), e))?;
 
         tracing::info!("Connected to user Chrome (with login state)");
-        Ok(Self::from_browser(browser, ConnectionMode::UserChrome, args.max_tabs, Some(child)))
+        Ok(Self::from_browser(browser, ConnectionMode::UserChrome, args.max_tabs, Some(child), Some(ws_url.trim().to_string())))
     }
 
     async fn launch_headless(args: &crate::cli::Args) -> anyhow::Result<Self> {
@@ -262,7 +327,7 @@ impl BrowserManager {
         let browser = Browser::launch_with_config(config).await
             .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?;
         tracing::info!("Launched headless Chrome with stealth");
-        Ok(Self::from_browser(browser, ConnectionMode::Headless, args.max_tabs, None))
+        Ok(Self::from_browser(browser, ConnectionMode::Headless, args.max_tabs, None, None))
     }
 
     fn from_browser(
@@ -270,12 +335,20 @@ impl BrowserManager {
         mode: ConnectionMode,
         max_tabs: usize,
         chrome_child: Option<std::process::Child>,
+        ws_url: Option<String>,
     ) -> Self {
         let browser = Arc::new(browser);
         let healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let tab_pool = TabPool::new(browser.clone(), max_tabs, healthy.clone());
         tracing::info!("Tab pool ready (max {} tabs)", max_tabs);
-        Self { browser, mode, tab_pool, chrome_child: std::sync::Mutex::new(chrome_child), healthy }
+        Self {
+            browser,
+            mode,
+            tab_pool,
+            chrome_child: std::sync::Mutex::new(chrome_child),
+            healthy,
+            connected_ws_url: ws_url,
+        }
     }
 
     pub fn is_healthy(&self) -> bool {

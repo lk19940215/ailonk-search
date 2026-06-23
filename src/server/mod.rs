@@ -82,16 +82,28 @@ impl SearchServer {
 
     fn check_cdp_error<T>(&self, result: &Result<T, ErrorData>, bm: &BrowserManager) {
         if let Err(e) = result {
-            let msg = &e.message;
-            if msg.contains("CDP reader")
-                || msg.contains("WebSocket")
-                || msg.contains("Transport error")
-                || msg.contains("connection is dead")
-            {
+            if is_fatal_cdp_error(&e.message) {
                 bm.mark_unhealthy();
             }
         }
     }
+}
+
+fn is_fatal_cdp_error(msg: &str) -> bool {
+    msg.contains("connection is dead")
+        || msg.contains("Transport error")
+        || msg.contains("CDP reader closed")
+        || msg.contains("CDP reader thread")
+        || msg.contains("WebSocket connection closed")
+        || msg.contains("broken pipe")
+        || msg.contains("Connection reset")
+}
+
+fn is_fatal_cdp_error_anyhow(err: &anyhow::Error) -> bool {
+    is_fatal_cdp_error(&err.to_string())
+}
+
+impl SearchServer {
 
     async fn rate_limiter(&self, bm: &BrowserManager) -> &Arc<RateLimiter> {
         use crate::browser::manager::ConnectionMode;
@@ -114,6 +126,10 @@ impl SearchServer {
         &self,
         Parameters(params): Parameters<tools::WebSearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let query = params.query.trim().to_string();
+        if query.is_empty() || query.chars().count() > 500 {
+            return Err(to_mcp_error("Query must be 1-500 characters"));
+        }
         let count = params.count.clamp(1, 20);
         let bm = self.browser().await?;
         let rl = self.rate_limiter(&bm).await;
@@ -133,7 +149,7 @@ impl SearchServer {
                 engine,
                 bm.mode(),
                 tab.page(),
-                &params.query,
+                &query,
                 count,
                 self.region,
             )
@@ -151,7 +167,7 @@ impl SearchServer {
         }
 
         let (engine_name, results) = result?;
-        let text = format_search_results(&params.query, &engine_name, &results);
+        let text = format_search_results(&query, &engine_name, &results);
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
@@ -175,23 +191,35 @@ impl SearchServer {
         let bm = self.browser().await?;
         let tab = bm.tab_pool().acquire().await.map_err(to_mcp_error)?;
 
-        let result = async {
-            interaction::navigate(tab.page(), &params.url, 15).await.map_err(to_mcp_error)?;
-            tab.page().wait(500).await;
+        let nav_result = interaction::navigate(tab.page(), &params.url, 15).await
+            .map_err(to_mcp_error);
+        if let Err(ref e) = nav_result {
+            if is_fatal_cdp_error(&e.message) {
+                bm.mark_unhealthy();
+            }
+            tab.close().await;
+            return Err(nav_result.unwrap_err());
+        }
+        tab.page().wait(500).await;
 
-            if interaction::is_captcha_present(tab.page()).await {
-                tracing::warn!(url = %params.url, "CAPTCHA detected, attempting resolve...");
-                match interaction::resolve_captcha_loop(tab.page(), 1).await {
-                    Ok(true) => tracing::info!("CAPTCHA resolved"),
-                    _ => tracing::warn!("CAPTCHA could not be resolved"),
+        if interaction::is_captcha_present(tab.page()).await {
+            tracing::warn!(url = %params.url, "CAPTCHA detected, attempting resolve...");
+            match interaction::resolve_captcha_loop(tab.page(), 1).await {
+                Ok(true) => tracing::info!("CAPTCHA resolved"),
+                _ => {
+                    tracing::warn!("CAPTCHA could not be resolved");
+                    tab.close().await;
+                    let text = format!(
+                        "# CAPTCHA\n\nSource: {} [READ_FAILED]\n\n---\n\n> Reason: CAPTCHA unresolved",
+                        params.url
+                    );
+                    return Ok(CallToolResult::success(vec![Content::text(text)]));
                 }
             }
-
-            tab.page().content().await
-                .map_err(|e| to_mcp_error(format!("Failed to get page content: {}", e)))
         }
-        .await;
 
+        let result = tab.page().content().await
+            .map_err(|e| to_mcp_error(format!("Failed to get page content: {}", e)));
         tab.close().await;
         self.check_cdp_error(&result, &bm);
         let html = result?;
@@ -283,13 +311,22 @@ impl SearchServer {
 
                             if interaction::is_captcha_present(tab.page()).await {
                                 tracing::warn!(url = %url, "CAPTCHA detected in batch_read");
-                                let _ = interaction::resolve_captcha_loop(tab.page(), 1).await;
+                                match interaction::resolve_captcha_loop(tab.page(), 1).await {
+                                    Ok(true) => {}
+                                    _ => anyhow::bail!("[READ_FAILED] CAPTCHA unresolved"),
+                                }
                             }
 
                             tab.page().content().await
                                 .map_err(|e| anyhow::anyhow!("Content fetch failed: {}", e))
                         }.await;
                         tab.close().await;
+
+                        if let Err(ref e) = page_result {
+                            if is_fatal_cdp_error_anyhow(e) {
+                                bm.mark_unhealthy();
+                            }
+                        }
                         let html = page_result?;
 
                         if html.is_empty() {
@@ -372,6 +409,10 @@ impl SearchServer {
         &self,
         Parameters(params): Parameters<tools::SearchAndReadParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let query = params.query.trim().to_string();
+        if query.is_empty() || query.chars().count() > 500 {
+            return Err(to_mcp_error("Query must be 1-500 characters"));
+        }
         let search_count = params.search_count.clamp(1, 20);
         let max_length_per_page = params.max_length_per_page.clamp(1, 15000);
 
@@ -392,7 +433,7 @@ impl SearchServer {
                 engine,
                 bm.mode(),
                 tab.page(),
-                &params.query,
+                &query,
                 search_count,
                 self.region,
             ).await
@@ -422,14 +463,23 @@ impl SearchServer {
             .collect();
 
         let bm = bm.clone();
+        let read_semaphore = Arc::new(tokio::sync::Semaphore::new(
+            read_count.min(bm.tab_pool().max_tabs()),
+        ));
         let mut handles = vec![];
         for url in urls_to_read.iter() {
+            let sem = read_semaphore.clone();
             let url = url.clone();
             let bm = bm.clone();
             let cache = self.cache.clone();
             let max_len = max_length_per_page;
 
             handles.push(tokio::spawn(async move {
+                let _permit = match sem.acquire().await {
+                    Ok(p) => p,
+                    Err(e) => return (url, Err::<String, anyhow::Error>(anyhow::anyhow!("Semaphore error: {e}"))),
+                };
+
                 let cache_key = ContentCache::key(&url, true, max_len);
                 if let Some(cached) = cache.get(&cache_key).await {
                     return (url, Ok::<String, anyhow::Error>(cached.content));
@@ -445,13 +495,22 @@ impl SearchServer {
 
                             if interaction::is_captcha_present(tab.page()).await {
                                 tracing::warn!(url = %url, "CAPTCHA detected in search_and_read");
-                                let _ = interaction::resolve_captcha_loop(tab.page(), 1).await;
+                                match interaction::resolve_captcha_loop(tab.page(), 1).await {
+                                    Ok(true) => {}
+                                    _ => anyhow::bail!("[READ_FAILED] CAPTCHA unresolved"),
+                                }
                             }
 
                             tab.page().content().await
                                 .map_err(|e| anyhow::anyhow!("Content fetch failed: {}", e))
                         }.await;
                         tab.close().await;
+
+                        if let Err(ref e) = page_result {
+                            if is_fatal_cdp_error_anyhow(e) {
+                                bm.mark_unhealthy();
+                            }
+                        }
                         let html = page_result?;
 
                         let extracted = crate::extract::content::ContentExtractor::extract(
@@ -505,7 +564,7 @@ impl SearchServer {
             }
         }
 
-        let mut output = format!("## Search results for \"{}\" (via {})\n\n", params.query, engine_name);
+        let mut output = format!("## Search results for \"{}\" (via {})\n\n", query, engine_name);
         for (i, r) in search_results.iter().enumerate() {
             let read_marker = if read_content.contains_key(&r.url) { " ⭐ read" } else { "" };
             output.push_str(&format!("{}. [{}]({}){}\n   {}\n\n", i + 1, r.title, r.url, read_marker, r.snippet));

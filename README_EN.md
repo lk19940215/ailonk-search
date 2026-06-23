@@ -16,7 +16,7 @@
 - **ML content extraction** — [rs-trafilatura](https://crates.io/crates/rs-trafilatura) extracts main content across 7 page types (article, blog, news, product, forum, documentation, generic)
 - **Content quality gating** — CAPTCHA/login-wall detection + quality scoring; low-quality pages marked `[READ_FAILED]` and not cached
 - **Smart page loading** — detects SSR vs SPA pages and waits accordingly (DOM content check → network idle fallback)
-- **Tab pool + caching** — semaphore-limited concurrent tabs with [moka](https://crates.io/crates/moka) content cache (default TTL 300 s)
+- **Tab pool + caching** — semaphore-limited concurrent tabs with [moka](https://crates.io/crates/moka) content cache (disabled by default, enable with `--cache-ttl`)
 - **Lazy Chrome init** — Chrome starts on the first tool call, not on `tools/list` (fast MCP handshake)
 - **Auto-reconnect** — detects CDP disconnection and automatically reconnects on next tool call
 - **Multi-engine search** — Google, Bing, DuckDuckGo with region-aware auto-selection (`cn` → cn.bing.com)
@@ -184,7 +184,7 @@ Global CLI flags (apply to all subcommands):
 | `--region` | `auto` | Search region: `auto` (detect locale), `cn`, `global` |
 | `--max-tabs` | `5` | Maximum concurrent browser tabs |
 | `--chrome-args` | — | Extra Chrome launch args (comma-separated) |
-| `--cache-ttl` | `300` | Content cache TTL in seconds (`0` to disable) |
+| `--cache-ttl` | `0` | Content cache TTL in seconds (`0` to disable, e.g. `300` to enable) |
 | `--allow-private-urls` | false | Allow accessing private/internal URLs (127.0.0.1, 192.168.*, etc.) |
 
 ### Subcommands
