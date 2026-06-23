@@ -155,8 +155,10 @@ async function getTargetVersion() {
     console.log(`Using pinned version: ${tag} (AILONK_VERSION)`);
     return tag;
   }
+  const apiUrl = `https://api.github.com/repos/${REPO}/releases/latest`;
+  const tryUrl = process.env.GITHUB_MIRROR ? applyMirror(apiUrl) : apiUrl;
   try {
-    const release = await fetchJSON(`https://api.github.com/repos/${REPO}/releases/latest`);
+    const release = await fetchJSON(tryUrl);
     if (!release.tag_name) {
       throw new Error("release response missing tag_name");
     }

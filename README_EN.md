@@ -11,7 +11,8 @@
 ## Features
 
 - **6 MCP tools** — `search_and_read` (recommended), `web_search`, `read_page`, `batch_read`, `screenshot`, `sync_login`
-- **Anti-bot stealth** — powered by [eoka](https://crates.io/crates/eoka): binary patching, human-like input, and consistent fingerprints
+- **Anti-bot stealth** — powered by [eoka](https://crates.io/crates/eoka): binary patching, human-like mouse input, and consistent fingerprints; search queries inserted via CDP insertText (~50x faster than per-character typing)
+- **Google snippet extraction** — structured DOM fallback for more reliable search snippets
 - **Three connection modes** — **AutoConnect** ⭐ (Chrome 144+, uses main browser with all login state), **UserChrome** (dedicated debug profile), **Headless** (zero-config)
 - **ML content extraction** — [rs-trafilatura](https://crates.io/crates/rs-trafilatura) extracts main content across 7 page types (article, blog, news, product, forum, documentation, generic)
 - **Content quality gating** — CAPTCHA/login-wall detection + quality scoring; low-quality pages marked `[READ_FAILED]` and not cached
@@ -34,6 +35,18 @@
 npx ailonk-search --help
 # or install globally
 npm install -g ailonk-search
+```
+
+The installer fetches the latest GitHub Release automatically (not tied to the npm package version), with 3 retries, 60s timeout, and download progress.
+
+**Environment variables (optional):**
+
+```bash
+# China users: mirror for faster downloads and version detection
+GITHUB_MIRROR=https://ghproxy.com npm install -g ailonk-search
+
+# Pin a specific version
+AILONK_VERSION=0.1.5 npm install -g ailonk-search
 ```
 
 **From GitHub Releases:**

@@ -11,7 +11,8 @@
 ## 核心特性
 
 - **6 个 MCP 工具** — `search_and_read`（推荐）、`web_search`、`read_page`、`batch_read`、`screenshot`、`sync_login`
-- **反爬虫保护** — 基于 [eoka](https://crates.io/crates/eoka)：二进制补丁 + 指纹一致性 + 类人鼠标/键盘操作
+- **反爬虫保护** — 基于 [eoka](https://crates.io/crates/eoka)：二进制补丁 + 指纹一致性 + 类人鼠标操作；搜索输入通过 CDP insertText 一次性插入（~50x 提速）
+- **Google snippet 提取** — 结构化 DOM fallback，搜索摘要更可靠
 - **三种运行模式** — **AutoConnect** ⭐（Chrome 144+，直接使用主浏览器所有登录态）、**UserChrome**（独立调试 Profile）、**Headless**（零配置）
 - **ML 正文提取** — [rs-trafilatura](https://crates.io/crates/rs-trafilatura) 支持 7 种页面类型（文章、博客、新闻、产品、论坛、文档、通用）
 - **智能等待** — network idle + MutationObserver DOM 稳定检测，精确等待 SPA 渲染完成
@@ -33,6 +34,18 @@
 npx ailonk-search --help
 # 或全局安装
 npm install -g ailonk-search
+```
+
+安装器会自动从 GitHub Releases 获取最新版本（不绑定 npm 包版本），支持 3 次重试、60s 超时和下载进度显示。
+
+**环境变量（可选）：**
+
+```bash
+# 中国用户：通过镜像加速下载和版本检测
+GITHUB_MIRROR=https://ghproxy.com npm install -g ailonk-search
+
+# 固定安装指定版本
+AILONK_VERSION=0.1.5 npm install -g ailonk-search
 ```
 
 **从 GitHub Releases 下载：**
