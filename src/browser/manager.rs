@@ -81,7 +81,6 @@ pub enum ConnectionMode {
 }
 
 pub struct BrowserManager {
-    #[allow(dead_code)]
     browser: Arc<Browser>,
     mode: ConnectionMode,
     tab_pool: TabPool,
@@ -424,12 +423,6 @@ impl BrowserManager {
     pub async fn attach_tab(&self, target_id: &str) -> anyhow::Result<Page> {
         self.browser.attach_page(target_id).await
             .map_err(|e| anyhow::anyhow!("Failed to attach to tab {}: {}", target_id, e))
-    }
-
-    #[allow(dead_code)]
-    pub async fn activate_tab(&self, target_id: &str) -> anyhow::Result<()> {
-        self.browser.activate_tab(target_id).await
-            .map_err(|e| anyhow::anyhow!("Failed to activate tab {}: {}", target_id, e))
     }
 
     pub async fn shutdown(&self) {

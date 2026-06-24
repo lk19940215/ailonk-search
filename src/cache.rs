@@ -45,9 +45,4 @@ impl ContentCache {
         }
         self.cache.insert(key, content).await;
     }
-
-    #[allow(dead_code)]
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
 }

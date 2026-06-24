@@ -122,38 +122,57 @@ pub fn click_authorize<'a>(
     Box::pin(click_authorize_inner(page, auth_type, 0))
 }
 
+const AUTH_BUTTON_SCORE_JS: &str = r#"
+    ((shouldClick) => {
+        const keywords = KEYWORDS_PLACEHOLDER;
+        const elements = document.querySelectorAll('a, button, [role="button"], input[type="submit"], span[onclick], div[onclick]');
+        let bestEl = null;
+        let bestText = null;
+        let bestScore = 0;
+        for (const el of elements) {
+            const text = (el.textContent || el.value || '').trim().toLowerCase();
+            if (text.length === 0 || text.length > 100) continue;
+            const rect = el.getBoundingClientRect();
+            if (rect.width < 10 || rect.height < 10) continue;
+            let score = 0;
+            for (const kw of keywords) {
+                if (text.includes(kw)) {
+                    const isCJK = /[\u4e00-\u9fff]/.test(kw);
+                    score += (kw.length > 3 || isCJK) ? 2 : 1;
+                }
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                bestEl = el;
+                bestText = text.substring(0, 80);
+            }
+        }
+        if (bestEl && bestScore >= 2) {
+            if (shouldClick) {
+                bestEl.click();
+                return (bestEl.textContent || bestEl.value || '').trim().substring(0, 80);
+            }
+            return bestText;
+        }
+        return null;
+    })(SHOULD_CLICK_PLACEHOLDER)
+"#;
+
+fn build_auth_button_score_js(should_click: bool) -> String {
+    let keywords_json = serde_json::to_string(AUTH_BUTTON_KEYWORDS).unwrap_or_default();
+    AUTH_BUTTON_SCORE_JS
+        .replace("KEYWORDS_PLACEHOLDER", &keywords_json)
+        .replace(
+            "SHOULD_CLICK_PLACEHOLDER",
+            if should_click { "true" } else { "false" },
+        )
+}
+
 /// Detect if the page has any clickable element with auth/login keywords.
 /// Returns the best candidate's text if found. Used for generic login detection.
 /// Should only be called when URL-based redirect detection suggests this is a login page.
 pub async fn detect_auth_button(page: &Page) -> Option<String> {
-    let js = r#"
-        (() => {
-            const keywords = KEYWORDS_PLACEHOLDER;
-            const elements = document.querySelectorAll('a, button, [role="button"], input[type="submit"], span[onclick], div[onclick]');
-            let best = null;
-            let bestScore = 0;
-            for (const el of elements) {
-                const text = (el.textContent || el.value || '').trim().toLowerCase();
-                if (text.length === 0 || text.length > 100) continue;
-                const rect = el.getBoundingClientRect();
-                if (rect.width < 10 || rect.height < 10) continue;
-                let score = 0;
-                for (const kw of keywords) {
-                    if (text.includes(kw)) {
-                        const isCJK = /[\u4e00-\u9fff]/.test(kw);
-                        score += (kw.length > 3 || isCJK) ? 2 : 1;
-                    }
-                }
-                if (score > bestScore) {
-                    bestScore = score;
-                    best = text.substring(0, 80);
-                }
-            }
-            return bestScore >= 2 ? best : null;
-        })()
-    "#;
-    let keywords_json = serde_json::to_string(AUTH_BUTTON_KEYWORDS).unwrap_or_default();
-    let js_final = js.replace("KEYWORDS_PLACEHOLDER", &keywords_json);
+    let js_final = build_auth_button_score_js(false);
 
     match page.evaluate::<Option<String>>(&js_final).await {
         Ok(Some(text)) => {
@@ -167,38 +186,7 @@ pub async fn detect_auth_button(page: &Page) -> Option<String> {
 /// Find and click the best auth/login button on the page using keyword scoring.
 /// More generic than try_sso_click; works on any login page (yapi, custom portals, etc.)
 pub async fn click_best_auth_button(page: &Page) -> bool {
-    let js = r#"
-        (() => {
-            const keywords = KEYWORDS_PLACEHOLDER;
-            const elements = document.querySelectorAll('a, button, [role="button"], input[type="submit"], span[onclick], div[onclick]');
-            let best = null;
-            let bestScore = 0;
-            for (const el of elements) {
-                const text = (el.textContent || el.value || '').trim().toLowerCase();
-                if (text.length === 0 || text.length > 100) continue;
-                const rect = el.getBoundingClientRect();
-                if (rect.width < 10 || rect.height < 10) continue;
-                let score = 0;
-                for (const kw of keywords) {
-                    if (text.includes(kw)) {
-                        const isCJK = /[\u4e00-\u9fff]/.test(kw);
-                        score += (kw.length > 3 || isCJK) ? 2 : 1;
-                    }
-                }
-                if (score > bestScore) {
-                    bestScore = score;
-                    best = el;
-                }
-            }
-            if (best && bestScore >= 2) {
-                best.click();
-                return (best.textContent || best.value || '').trim().substring(0, 80);
-            }
-            return null;
-        })()
-    "#;
-    let keywords_json = serde_json::to_string(AUTH_BUTTON_KEYWORDS).unwrap_or_default();
-    let js_final = js.replace("KEYWORDS_PLACEHOLDER", &keywords_json);
+    let js_final = build_auth_button_score_js(true);
 
     match page.evaluate::<Option<String>>(&js_final).await {
         Ok(Some(text)) => {
