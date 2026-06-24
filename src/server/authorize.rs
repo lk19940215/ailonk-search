@@ -92,11 +92,10 @@ pub async fn handle_click_authorize(
                     match page_auth {
                         interaction::auth::AuthPageType::NotAuth => {
                             let url_lower = page_url.to_lowercase();
-                            let at_target = url_lower.trim_end_matches('/') == params.url.to_lowercase().trim_end_matches('/');
-                            let not_login = !url_lower.contains("auth.html")
-                                && !url_lower.contains("stlogin")
-                                && !url_lower.contains("/login");
-                            if at_target || (not_login && page_url != current_url) {
+                            let target_lower = params.url.to_lowercase();
+                            let at_target = url_lower.trim_end_matches('/') == target_lower.trim_end_matches('/');
+
+                            if at_target {
                                 return Ok(interaction::auth::AuthResult {
                                     success: true,
                                     auth_type: auth_type.clone(),
@@ -104,9 +103,12 @@ pub async fn handle_click_authorize(
                                     message: format!("Auth completed after {} steps.", step - 1),
                                 });
                             }
+
+                            // Page is not auth and not at target — try navigating to target
                             if interaction::navigate(page, &params.url, 10).await.is_ok() {
                                 let nav_url = page.url().await.unwrap_or_default();
-                                if nav_url.to_lowercase().trim_end_matches('/') == params.url.to_lowercase().trim_end_matches('/') {
+                                let nav_auth = interaction::auth::detect_auth_page_with_target(page, Some(&params.url)).await;
+                                if matches!(nav_auth, interaction::auth::AuthPageType::NotAuth) {
                                     return Ok(interaction::auth::AuthResult {
                                         success: true,
                                         auth_type: auth_type.clone(),
@@ -114,6 +116,8 @@ pub async fn handle_click_authorize(
                                         message: format!("Auth completed. Navigated to target after {} steps.", step - 1),
                                     });
                                 }
+                                // Target still requires auth — continue loop
+                                continue;
                             }
                             let final_url = page.url().await.unwrap_or_default();
                             return Ok(interaction::auth::AuthResult {
@@ -188,7 +192,7 @@ pub async fn handle_click_authorize(
     match result {
         Ok(auth_result) => {
             let status = match (&auth_result.auth_type, auth_result.success) {
-                (interaction::auth::AuthPageType::NotAuth, _) => "no_auth_needed",
+                (interaction::auth::AuthPageType::NotAuth, true) => "no_auth_needed",
                 (_, true) => "authorized",
                 (_, false) => "manual_required",
             };
