@@ -610,12 +610,10 @@ impl SearchServer {
         Use when read_page returns [READ_FAILED] due to expired cookies/sessions (non-OAuth). \
         After syncing, the browser reconnects automatically — retry the failed read_page call.")]
     async fn sync_login(&self) -> Result<CallToolResult, ErrorData> {
-        // Kill the debug Chrome process so cookie files are unlocked and
-        // won't be overwritten by Chrome's shutdown flush.
-        self.kill_debug_chrome().await;
+        // Disconnect cleanly first, then kill Chrome to avoid broken WebSocket propagation
         self.browser.shutdown().await;
+        self.kill_debug_chrome().await;
 
-        // Brief wait for process to fully exit and release file locks
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         let (synced, skipped) = crate::browser::profile::sync_login_files()

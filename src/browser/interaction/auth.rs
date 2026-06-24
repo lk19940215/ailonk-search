@@ -139,7 +139,10 @@ pub async fn detect_auth_button(page: &Page) -> Option<String> {
                 if (rect.width < 10 || rect.height < 10) continue;
                 let score = 0;
                 for (const kw of keywords) {
-                    if (text.includes(kw)) score += (kw.length > 3 ? 2 : 1);
+                    if (text.includes(kw)) {
+                        const isCJK = /[\u4e00-\u9fff]/.test(kw);
+                        score += (kw.length > 3 || isCJK) ? 2 : 1;
+                    }
                 }
                 if (score > bestScore) {
                     bestScore = score;
@@ -177,7 +180,10 @@ pub async fn click_best_auth_button(page: &Page) -> bool {
                 if (rect.width < 10 || rect.height < 10) continue;
                 let score = 0;
                 for (const kw of keywords) {
-                    if (text.includes(kw)) score += (kw.length > 3 ? 2 : 1);
+                    if (text.includes(kw)) {
+                        const isCJK = /[\u4e00-\u9fff]/.test(kw);
+                        score += (kw.length > 3 || isCJK) ? 2 : 1;
+                    }
                 }
                 if (score > bestScore) {
                     bestScore = score;
