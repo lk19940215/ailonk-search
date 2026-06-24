@@ -64,32 +64,30 @@ pub async fn handle_click_authorize(
             interaction::auth::AuthPageType::CustomSso | interaction::auth::AuthPageType::GenericLogin => {
                 let page = tab.page();
 
-                const MAX_LOOPS: u8 = 4;
-                let mut loop_count = 0u8;
-                let mut last_race = String::from("none");
+                let mut step = 0u8;
+                let mut last_event = String::from("none");
                 let global_deadline = tokio::time::Instant::now()
                     + std::time::Duration::from_secs(timeout);
 
                 loop {
-                    loop_count += 1;
-                    if loop_count > MAX_LOOPS || tokio::time::Instant::now() > global_deadline {
+                    if tokio::time::Instant::now() > global_deadline {
                         let final_url = page.url().await.unwrap_or_default();
-                        let reason = if loop_count > MAX_LOOPS {
-                            format!("max iterations ({})", MAX_LOOPS)
-                        } else {
-                            format!("timeout ({}s)", timeout)
-                        };
                         return Ok(interaction::auth::AuthResult {
                             success: false,
                             auth_type: auth_type.clone(),
                             final_url,
-                            message: format!("Auth loop exceeded {}. last_race={}", reason, last_race),
+                            message: format!("Auth timed out ({}s). last_event={}", timeout, last_event),
                         });
                     }
 
+                    // Ensure page is fully loaded before detection
+                    page.wait_for("body", 5000).await.ok();
+                    let _ = page.wait_for_network_idle(500, 8000).await;
+
                     let page_url = page.url().await.unwrap_or_default();
                     let page_auth = interaction::auth::detect_auth_page_with_target(page, Some(&params.url)).await;
-                    tracing::info!(loop_count, url = %page_url, auth = %page_auth, "Auth loop iteration");
+                    step += 1;
+                    tracing::info!(step, url = %page_url, auth = %page_auth, "Auth step");
 
                     match page_auth {
                         interaction::auth::AuthPageType::NotAuth => {
@@ -103,7 +101,7 @@ pub async fn handle_click_authorize(
                                     success: true,
                                     auth_type: auth_type.clone(),
                                     final_url: page_url,
-                                    message: format!("Auth completed after {} steps.", loop_count - 1),
+                                    message: format!("Auth completed after {} steps.", step - 1),
                                 });
                             }
                             if interaction::navigate(page, &params.url, 10).await.is_ok() {
@@ -113,7 +111,7 @@ pub async fn handle_click_authorize(
                                         success: true,
                                         auth_type: auth_type.clone(),
                                         final_url: nav_url,
-                                        message: format!("Auth completed. Navigated to target after {} steps.", loop_count - 1),
+                                        message: format!("Auth completed. Navigated to target after {} steps.", step - 1),
                                     });
                                 }
                             }
@@ -122,12 +120,10 @@ pub async fn handle_click_authorize(
                                 success: false,
                                 auth_type: auth_type.clone(),
                                 final_url,
-                                message: format!("Auth loop: page is not auth but target not reachable. last_race={}", last_race),
+                                message: format!("Page is not auth but target not reachable. last_event={}", last_event),
                             });
                         }
                         _ => {
-                            page.wait(2000).await;
-
                             let pre_click_url = page.url().await.unwrap_or_default();
 
                             let click_pw = interaction::popup::PopupWatcher::new(bm.clone())
@@ -135,48 +131,47 @@ pub async fn handle_click_authorize(
                                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
                             let clicked = interaction::auth::try_sso_click(page).await;
-                            tracing::info!(clicked, loop_count, "Auth button click");
+                            tracing::info!(clicked, step, "Auth button click");
 
                             if !clicked {
-                                tracing::debug!(loop_count, "Click failed, will retry on next iteration");
-                                tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                                 continue;
                             }
 
-                            // Wait for redirect after click. Poll URL frequently.
+                            // Wait for page response: redirect or popup
                             let mut redirected = false;
                             let redirect_deadline = tokio::time::Instant::now()
-                                + std::time::Duration::from_secs(12);
+                                + std::time::Duration::from_secs(15);
                             while tokio::time::Instant::now() < redirect_deadline {
                                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                                 let current = page.url().await.unwrap_or_default();
                                 if current != pre_click_url {
-                                    tracing::info!(new_url = %current, "Page redirected after click");
+                                    tracing::info!(new_url = %current, "Redirected after click");
                                     redirected = true;
-                                    last_race = String::from("redirect");
+                                    last_event = String::from("redirect");
                                     break;
                                 }
                             }
-                            if !redirected {
-                                // No redirect — check for popup
-                                if let Some(popup_id) = click_pw.wait_for_popup(3).await {
-                                    if let Ok(popup_page) = click_pw.attach(&popup_id).await {
-                                        let popup_url = popup_page.url().await.unwrap_or_default();
-                                        let popup_auth = interaction::auth::detect_auth_page(&popup_page).await;
-                                        tracing::info!(popup_url = %popup_url, popup_auth = %popup_auth, "Popup detected");
 
-                                        if !matches!(popup_auth, interaction::auth::AuthPageType::NotAuth) {
-                                            let _ = interaction::auth::click_authorize(&popup_page, &popup_auth).await;
-                                        }
-                                        click_pw.wait_for_close(&popup_id, timeout.min(15)).await;
-                                        last_race = format!("popup(url={})", popup_url.chars().take(60).collect::<String>());
+                            if redirected {
+                                // Let new page fully load (including iframes)
+                                page.wait_for("body", 5000).await.ok();
+                                let _ = page.wait_for_network_idle(500, 8000).await;
+                            } else if let Some(popup_id) = click_pw.wait_for_popup(3).await {
+                                if let Ok(popup_page) = click_pw.attach(&popup_id).await {
+                                    let popup_url = popup_page.url().await.unwrap_or_default();
+                                    let popup_auth = interaction::auth::detect_auth_page(&popup_page).await;
+                                    tracing::info!(popup_url = %popup_url, popup_auth = %popup_auth, "Popup detected");
+
+                                    if !matches!(popup_auth, interaction::auth::AuthPageType::NotAuth) {
+                                        let _ = interaction::auth::click_authorize(&popup_page, &popup_auth).await;
                                     }
-                                } else {
-                                    last_race = String::from("no_redirect_no_popup");
+                                    click_pw.wait_for_close(&popup_id, timeout.min(15)).await;
+                                    last_event = format!("popup(url={})", popup_url.chars().take(60).collect::<String>());
                                 }
-
-                                tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
-                                let _ = page.wait_for_network_idle(500, 3000).await;
+                            } else {
+                                last_event = String::from("no_response");
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                             }
                         }
                     }
