@@ -184,6 +184,41 @@ ailonk-search setup
 
 **授权失败处理**：`read_page` 返回 `[READ_FAILED]` 时 → 先尝试 `click_authorize`（处理 OAuth 授权弹窗）→ 若仍失败则 `sync_login`（刷新 Cookie/Session）
 
+### click_authorize — OAuth/SSO 授权
+
+自动识别并点击授权页面上的按钮，完成 OAuth/SSO 登录流程。适用于 `read_page` 因授权拦截返回 `[READ_FAILED]` 的场景。
+
+**适用**：Google OAuth 同意页、Google 账号选择、Google SAML SSO、企业自定义 SSO、通用登录页（含可检测的登录/SSO 按钮）、多步授权流程（如 SSO → Google → 回跳）
+
+**不适用**：Cookie/Session 过期（请用 `sync_login`）、用户名密码登录、CAPTCHA、多因素认证
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `url` | string | 必填 | 需要授权的页面 URL |
+| `timeout` | uint | 30 | 等待授权流程完成的最长时间（秒） |
+
+**流程**：导航到 URL → 检测授权类型 → 点击按钮 → 等待 Chrome 原生处理 → 重定向完成
+
+**示例**：
+
+```json
+{
+  "tool": "click_authorize",
+  "arguments": {
+    "url": "https://docs.google.com/document/d/abc123/edit",
+    "timeout": 30
+  }
+}
+```
+
+**典型工作流**：
+
+```
+1. read_page("https://docs.google.com/...")  →  [READ_FAILED]（OAuth 拦截）
+2. click_authorize("https://docs.google.com/...")  →  授权成功
+3. read_page("https://docs.google.com/...")  →  返回正文 Markdown
+```
+
 ---
 
 ## 配置参数

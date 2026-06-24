@@ -183,6 +183,43 @@ Edit `~/.claude/settings.json` or project `.mcp.json`:
 
 **Recommended workflow:** `search_and_read` → `read_page` (specific URLs) → `web_search` (only need result lists)
 
+**Auth failure handling:** When `read_page` returns `[READ_FAILED]` → try `click_authorize` first (OAuth/SSO consent pages) → if still failing, call `sync_login` (refresh cookies/sessions)
+
+### click_authorize — OAuth/SSO Authorization
+
+Detects and clicks through authorization pages to complete OAuth/SSO login flows. Use when `read_page` returns `[READ_FAILED]` because the page requires authorization.
+
+**Use for:** Google OAuth consent, Google account selection, Google SAML SSO, custom corporate SSO (e.g. Google Sign-In), generic login pages with a detectable login/SSO button, multi-step auth flows (e.g. SSO → Google → redirect back)
+
+**Not for:** Expired cookies/sessions (use `sync_login`), username/password login, CAPTCHA, or multi-factor authentication
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `url` | string | required | URL that requires authorization |
+| `timeout` | uint | 30 | Max seconds to wait for the auth flow to complete |
+
+**Flow:** Navigate → detect auth type → click button → wait for Chrome to handle natively → redirect
+
+**Example:**
+
+```json
+{
+  "tool": "click_authorize",
+  "arguments": {
+    "url": "https://docs.google.com/document/d/abc123/edit",
+    "timeout": 30
+  }
+}
+```
+
+**Typical workflow:**
+
+```
+1. read_page("https://docs.google.com/...")  →  [READ_FAILED] (OAuth blocked)
+2. click_authorize("https://docs.google.com/...")  →  authorization succeeded
+3. read_page("https://docs.google.com/...")  →  returns Markdown content
+```
+
 ---
 
 ## Configuration
