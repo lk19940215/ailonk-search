@@ -119,19 +119,43 @@ ailonk-search setup
 {
   "mcpServers": {
     "ailonk-search": {
-      "command": "ailonk-search",
+      "command": "npx",
+      "args": ["-y", "ailonk-search"]
+    }
+  }
+}
+```
+
+> 自动检测：AutoConnect → UserChrome → Headless。
+> 若需强制 Headless：`"args": ["-y", "ailonk-search", "--headless"]`
+
+<details>
+<summary>全局安装方式（需使用完整路径）</summary>
+
+```bash
+npm install -g ailonk-search
+```
+
+Cursor 不继承 shell 环境变量，需使用完整路径：
+
+```json
+{
+  "mcpServers": {
+    "ailonk-search": {
+      "command": "/path/to/node/bin/ailonk-search",
       "args": ["serve"]
     }
   }
 }
 ```
 
-> 需先运行 `npm install -g ailonk-search` 全局安装。
-> 自动检测：AutoConnect → UserChrome → Headless。
-> 若需强制 Headless：`"args": ["serve", "--headless"]`
+查找路径：`which ailonk-search`
 
-<details>
-<summary>npx 方式（无需全局安装）</summary>
+</details>
+
+#### Claude Code
+
+编辑 `~/.claude/settings.json` 或项目 `.mcp.json`：
 
 ```json
 {
@@ -144,30 +168,13 @@ ailonk-search setup
 }
 ```
 
-</details>
-
-#### Claude Code
-
-编辑 `~/.claude/settings.json` 或项目 `.mcp.json`：
-
-```json
-{
-  "mcpServers": {
-    "ailonk-search": {
-      "command": "ailonk-search",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
 #### Codex / OpenAI CLI
 
 ```json
 {
   "ailonk-search": {
-    "command": "ailonk-search",
-    "args": ["serve", "--headless"]
+    "command": "npx",
+    "args": ["-y", "ailonk-search", "--headless"]
   }
 }
 ```
@@ -176,13 +183,13 @@ ailonk-search setup
 
 ```json
 // 强制 Headless 模式
-"args": ["serve", "--headless"]
+"args": ["-y", "ailonk-search", "--headless"]
 
 // 自定义浏览器路径 + 中国区搜索
-"args": ["serve", "--chrome-path", "/path/to/chrome", "--region", "cn"]
+"args": ["-y", "ailonk-search", "--chrome-path", "/path/to/chrome", "--region", "cn"]
 
 // 允许访问内网 URL
-"args": ["serve", "--allow-private-urls"]
+"args": ["-y", "ailonk-search", "--allow-private-urls"]
 ```
 
 ---

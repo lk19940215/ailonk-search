@@ -120,19 +120,43 @@ Edit `~/.cursor/mcp.json` (or project `.cursor/mcp.json`):
 {
   "mcpServers": {
     "ailonk-search": {
-      "command": "ailonk-search",
+      "command": "npx",
+      "args": ["-y", "ailonk-search"]
+    }
+  }
+}
+```
+
+> Auto-detects: AutoConnect → UserChrome → Headless.
+> To force Headless: `"args": ["-y", "ailonk-search", "--headless"]`
+
+<details>
+<summary>Global install method (requires full path)</summary>
+
+```bash
+npm install -g ailonk-search
+```
+
+Cursor does not inherit shell environment variables, so you must use the full binary path:
+
+```json
+{
+  "mcpServers": {
+    "ailonk-search": {
+      "command": "/path/to/node/bin/ailonk-search",
       "args": ["serve"]
     }
   }
 }
 ```
 
-> Requires `npm install -g ailonk-search` first.
-> Auto-detects: AutoConnect → UserChrome → Headless.
-> To force Headless: `"args": ["serve", "--headless"]`
+Find your path: `which ailonk-search`
 
-<details>
-<summary>npx method (no global install needed)</summary>
+</details>
+
+#### Claude Code
+
+Edit `~/.claude/settings.json` or project `.mcp.json`:
 
 ```json
 {
@@ -145,30 +169,13 @@ Edit `~/.cursor/mcp.json` (or project `.cursor/mcp.json`):
 }
 ```
 
-</details>
-
-#### Claude Code
-
-Edit `~/.claude/settings.json` or project `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "ailonk-search": {
-      "command": "ailonk-search",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
 #### Codex / OpenAI CLI
 
 ```json
 {
   "ailonk-search": {
-    "command": "ailonk-search",
-    "args": ["serve", "--headless"]
+    "command": "npx",
+    "args": ["-y", "ailonk-search", "--headless"]
   }
 }
 ```
@@ -177,13 +184,13 @@ Edit `~/.claude/settings.json` or project `.mcp.json`:
 
 ```json
 // Force Headless mode
-"args": ["serve", "--headless"]
+"args": ["-y", "ailonk-search", "--headless"]
 
 // Custom Chrome path + China region
-"args": ["serve", "--chrome-path", "/path/to/chrome", "--region", "cn"]
+"args": ["-y", "ailonk-search", "--chrome-path", "/path/to/chrome", "--region", "cn"]
 
 // Allow accessing private/internal URLs
-"args": ["serve", "--allow-private-urls"]
+"args": ["-y", "ailonk-search", "--allow-private-urls"]
 ```
 
 ---
