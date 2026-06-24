@@ -32,12 +32,14 @@
 **Via npm (recommended, no Rust required):**
 
 ```bash
-npx ailonk-search --help
-# or install globally
+# Global install (recommended)
 npm install -g ailonk-search
+
+# Or run directly via npx
+npx -y ailonk-search --help
 ```
 
-The installer fetches the latest GitHub Release automatically (not tied to the npm package version), with 3 retries, 60s timeout, and download progress.
+The npm package version is synced with GitHub Releases. The installer downloads the platform-specific binary with 3 retries, 60s timeout, and progress display. Update: `npm update -g ailonk-search`.
 
 **Environment variables (optional):**
 
@@ -118,19 +120,19 @@ Edit `~/.cursor/mcp.json` (or project `.cursor/mcp.json`):
 {
   "mcpServers": {
     "ailonk-search": {
-      "command": "npx",
-      "args": ["-y", "ailonk-search"]
+      "command": "ailonk-search",
+      "args": ["serve"]
     }
   }
 }
 ```
 
-> This auto-detects: AutoConnect → UserChrome → Headless fallback.
-> To force Headless: `"args": ["-y", "ailonk-search", "--headless"]`
+> Requires `npm install -g ailonk-search` first.
+> Auto-detects: AutoConnect → UserChrome → Headless.
+> To force Headless: `"args": ["serve", "--headless"]`
 
-#### Claude Code
-
-Edit `~/.claude/settings.json` or project `.mcp.json`:
+<details>
+<summary>npx method (no global install needed)</summary>
 
 ```json
 {
@@ -143,13 +145,30 @@ Edit `~/.claude/settings.json` or project `.mcp.json`:
 }
 ```
 
+</details>
+
+#### Claude Code
+
+Edit `~/.claude/settings.json` or project `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "ailonk-search": {
+      "command": "ailonk-search",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
 #### Codex / OpenAI CLI
 
 ```json
 {
   "ailonk-search": {
-    "command": "npx",
-    "args": ["-y", "ailonk-search", "--headless"]
+    "command": "ailonk-search",
+    "args": ["serve", "--headless"]
   }
 }
 ```
@@ -158,13 +177,13 @@ Edit `~/.claude/settings.json` or project `.mcp.json`:
 
 ```json
 // Force Headless mode
-"args": ["-y", "ailonk-search", "--headless"]
+"args": ["serve", "--headless"]
 
 // Custom Chrome path + China region
-"args": ["-y", "ailonk-search", "--chrome-path", "/path/to/chrome", "--region", "cn"]
+"args": ["serve", "--chrome-path", "/path/to/chrome", "--region", "cn"]
 
 // Allow accessing private/internal URLs
-"args": ["-y", "ailonk-search", "--allow-private-urls"]
+"args": ["serve", "--allow-private-urls"]
 ```
 
 ---

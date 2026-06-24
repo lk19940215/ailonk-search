@@ -31,12 +31,14 @@
 **通过 npm（推荐，无需 Rust 环境）：**
 
 ```bash
-npx ailonk-search --help
-# 或全局安装
+# 全局安装（推荐）
 npm install -g ailonk-search
+
+# 或通过 npx 直接运行
+npx -y ailonk-search --help
 ```
 
-安装器会自动从 GitHub Releases 获取最新版本（不绑定 npm 包版本），支持 3 次重试、60s 超时和下载进度显示。
+npm 包版本与 GitHub Release 同步发布。安装器自动下载对应平台的二进制文件，支持 3 次重试、60s 超时和进度显示。更新：`npm update -g ailonk-search`。
 
 **环境变量（可选）：**
 
@@ -117,19 +119,19 @@ ailonk-search setup
 {
   "mcpServers": {
     "ailonk-search": {
-      "command": "npx",
-      "args": ["-y", "ailonk-search"]
+      "command": "ailonk-search",
+      "args": ["serve"]
     }
   }
 }
 ```
 
-> 上述配置会自动检测：有 Profile → UserChrome 模式，无 Profile → Headless 模式。
-> 若需强制 Headless：`"args": ["-y", "ailonk-search", "--headless"]`
+> 需先运行 `npm install -g ailonk-search` 全局安装。
+> 自动检测：AutoConnect → UserChrome → Headless。
+> 若需强制 Headless：`"args": ["serve", "--headless"]`
 
-#### Claude Code
-
-编辑 `~/.claude/settings.json` 或项目 `.mcp.json`：
+<details>
+<summary>npx 方式（无需全局安装）</summary>
 
 ```json
 {
@@ -142,13 +144,30 @@ ailonk-search setup
 }
 ```
 
+</details>
+
+#### Claude Code
+
+编辑 `~/.claude/settings.json` 或项目 `.mcp.json`：
+
+```json
+{
+  "mcpServers": {
+    "ailonk-search": {
+      "command": "ailonk-search",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
 #### Codex / OpenAI CLI
 
 ```json
 {
   "ailonk-search": {
-    "command": "npx",
-    "args": ["-y", "ailonk-search", "--headless"]
+    "command": "ailonk-search",
+    "args": ["serve", "--headless"]
   }
 }
 ```
@@ -157,13 +176,13 @@ ailonk-search setup
 
 ```json
 // 强制 Headless 模式
-"args": ["-y", "ailonk-search", "--headless"]
+"args": ["serve", "--headless"]
 
 // 自定义浏览器路径 + 中国区搜索
-"args": ["-y", "ailonk-search", "--chrome-path", "/path/to/chrome", "--region", "cn"]
+"args": ["serve", "--chrome-path", "/path/to/chrome", "--region", "cn"]
 
 // 允许访问内网 URL
-"args": ["-y", "ailonk-search", "--allow-private-urls"]
+"args": ["serve", "--allow-private-urls"]
 ```
 
 ---

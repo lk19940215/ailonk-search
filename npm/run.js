@@ -2,38 +2,11 @@
 "use strict";
 
 const fs = require("fs");
-const { spawn, execFileSync } = require("child_process");
+const { spawn } = require("child_process");
 const path = require("path");
 
-const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const ext = process.platform === "win32" ? ".exe" : "";
 const bin = path.join(__dirname, `ailonk-search${ext}`);
-const installScript = path.join(__dirname, "install.js");
-const checkFile = path.join(__dirname, ".last-update-check");
-
-function shouldCheckForUpdate() {
-  if (!fs.existsSync(bin)) return true;
-  try {
-    const ts = parseInt(fs.readFileSync(checkFile, "utf8").trim(), 10);
-    return Date.now() - ts > CHECK_INTERVAL_MS;
-  } catch {
-    return true;
-  }
-}
-
-if (shouldCheckForUpdate()) {
-  try {
-    execFileSync(process.execPath, [installScript], {
-      stdio: "inherit",
-      timeout: 30_000,
-      env: process.env,
-    });
-    fs.writeFileSync(checkFile, String(Date.now()));
-  } catch (err) {
-    console.error(`Auto-update check failed: ${err.message}`);
-    console.error("Continuing with existing binary...");
-  }
-}
 
 if (!fs.existsSync(bin)) {
   console.error("ailonk-search binary not found.");
