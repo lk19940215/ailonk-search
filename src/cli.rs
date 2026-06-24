@@ -57,6 +57,10 @@ pub struct Args {
     #[arg(long, global = true)]
     pub headless: bool,
 
+    /// Skip auto-connect and force UserChrome mode (launch separate Chrome with debug profile)
+    #[arg(long, global = true)]
+    pub no_auto_connect: bool,
+
     /// Path to Chrome executable
     #[arg(long, global = true)]
     pub chrome_path: Option<String>,

@@ -110,6 +110,11 @@ impl BrowserManager {
                 tracing::debug!("Cached WS URL reconnect failed, falling back to full connect");
             }
 
+            if args.no_auto_connect {
+                tracing::info!("--no-auto-connect: skipping auto-connect, launching UserChrome");
+                return Self::launch_user_chrome(args).await;
+            }
+
             // If debug profile exists, probe port 19222 before scanning DevToolsActivePort
             if super::profile::debug_profile_dir().exists() {
                 if let Some(bm) = Self::try_debug_port_connect(DEBUG_PORT, args.max_tabs).await {
