@@ -581,7 +581,6 @@ async fn handle_generic_login(page: &Page, initial_url: &str, depth: u8) -> Auth
 
 pub fn extract_sso_target(url: &str) -> Option<String> {
     for param in SSO_REDIRECT_PARAMS {
-        let param_name = param.trim_end_matches('=');
         if let Some(pos) = url.find(param) {
             let value_start = pos + param.len();
             let value_end = url[value_start..].find('&').map(|i| value_start + i).unwrap_or(url.len());
@@ -592,7 +591,6 @@ pub fn extract_sso_target(url: &str) -> Option<String> {
                     return Some(target);
                 }
             }
-            let _ = param_name;
         }
     }
     None
