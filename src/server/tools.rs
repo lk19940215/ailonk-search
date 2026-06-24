@@ -86,6 +86,17 @@ pub struct ScreenshotParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ClickAuthorizeParams {
+    /// The URL that requires OAuth/SSO authorization. Navigate to this URL and handle any auth pages.
+    pub url: String,
+    /// Maximum time in seconds to wait for the authorization flow to complete (default: 30)
+    #[serde(default = "default_auth_timeout")]
+    pub timeout: u64,
+}
+
+fn default_auth_timeout() -> u64 { 30 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchAndReadParams {
     /// Search query. Be specific: include entity names, versions, years. E.g. 'DeepSeek V4 benchmark results', 'React 19 server components guide'. Match language to target content. Max 500 chars.
     pub query: String,

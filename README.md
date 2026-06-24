@@ -10,7 +10,7 @@
 
 ## 核心特性
 
-- **6 个 MCP 工具** — `search_and_read`（推荐）、`web_search`、`read_page`、`batch_read`、`screenshot`、`sync_login`
+- **7 个 MCP 工具** — `search_and_read`（推荐）、`web_search`、`read_page`、`batch_read`、`screenshot`、`click_authorize`、`sync_login`
 - **反爬虫保护** — 基于 [eoka](https://crates.io/crates/eoka)：二进制补丁 + 指纹一致性 + 类人鼠标操作；搜索输入通过 CDP insertText 一次性插入（~50x 提速）
 - **Google snippet 提取** — 结构化 DOM fallback，搜索摘要更可靠
 - **三种运行模式** — **AutoConnect** ⭐（Chrome 144+，直接使用主浏览器所有登录态）、**UserChrome**（独立调试 Profile）、**Headless**（零配置）
@@ -177,9 +177,12 @@ ailonk-search setup
 | `read_page` | 读取指定 URL，提取为 Markdown | `url`, `include_links`, `max_length` |
 | `batch_read` | 并发读取最多 10 个 URL | `urls`, `max_length_per_page`, `concurrency` |
 | `screenshot` | 截图（返回 base64 或保存文件）。文本内容请用 `read_page` | `url`, `format`, `file_path` |
+| `click_authorize` | 自动识别并点击 OAuth/SSO 授权页面（Google OAuth、账号选择、SAML 等） | `url`, `timeout` |
 | `sync_login` | 从主 Chrome 同步登录态到调试 Profile（AI 可自动调用） | 无参数 |
 
 **推荐工作流**：`search_and_read` → `read_page`（深入特定 URL）→ `web_search`（仅需结果列表时）
+
+**授权失败处理**：`read_page` 返回 `[READ_FAILED]` 时 → 先尝试 `click_authorize`（处理 OAuth 授权弹窗）→ 若仍失败则 `sync_login`（刷新 Cookie/Session）
 
 ---
 
@@ -295,12 +298,16 @@ cargo run -- test-all
 
 ```
 src/
-├── server/       # MCP 工具定义和处理器
-├── browser/      # Chrome CDP 管理、Tab 池、页面导航
-├── search/       # Google、Bing、DuckDuckGo 搜索引擎
-├── extract/      # rs-trafilatura 正文提取
-├── cache/        # moka 内容缓存
-└── commands/     # CLI 子命令（serve、setup、sync、test）
+├── server/          # MCP 工具定义和处理器
+├── browser/
+│   ├── interaction/ # 页面交互层（导航、CAPTCHA、授权、弹窗、Cookie consent）
+│   ├── manager.rs   # Chrome 连接管理（AutoConnect/UserChrome/Headless）
+│   ├── pool.rs      # Tab 池（信号量限制并发）
+│   └── profile.rs   # 登录态 Profile 管理
+├── search/          # Google、Bing、DuckDuckGo 搜索引擎
+├── extract/         # rs-trafilatura 正文提取
+├── cache/           # moka 内容缓存
+└── commands/        # CLI 子命令（serve、setup、sync、test）
 ```
 
 ---

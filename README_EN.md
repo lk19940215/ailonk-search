@@ -10,7 +10,7 @@
 
 ## Features
 
-- **6 MCP tools** — `search_and_read` (recommended), `web_search`, `read_page`, `batch_read`, `screenshot`, `sync_login`
+- **7 MCP tools** — `search_and_read` (recommended), `web_search`, `read_page`, `batch_read`, `screenshot`, `click_authorize`, `sync_login`
 - **Anti-bot stealth** — powered by [eoka](https://crates.io/crates/eoka): binary patching, human-like mouse input, and consistent fingerprints; search queries inserted via CDP insertText (~50x faster than per-character typing)
 - **Google snippet extraction** — structured DOM fallback for more reliable search snippets
 - **Three connection modes** — **AutoConnect** ⭐ (Chrome 144+, uses main browser with all login state), **UserChrome** (dedicated debug profile), **Headless** (zero-config)
@@ -178,6 +178,7 @@ Edit `~/.claude/settings.json` or project `.mcp.json`:
 | `read_page` | Fetch a single URL and extract clean Markdown. | `url`, `include_links` (default true), `max_length` (default 15000) |
 | `batch_read` | Read up to 10 URLs concurrently. | `urls`, `max_length_per_page` (default 5000), `concurrency` (default 5, max 10) |
 | `screenshot` | Capture a page as PNG/JPEG (base64 or file). Prefer `read_page` for text. | `url`, `format` (png/jpeg), `file_path` (optional) |
+| `click_authorize` | Detect and click through OAuth/SSO authorization pages (Google OAuth, account selection, SAML, etc.) | `url`, `timeout` (default: 30s) |
 | `sync_login` | Sync login state from main Chrome to debug profile. Use when `read_page` returns `[READ_FAILED]` on auth-required pages. | No parameters |
 
 **Recommended workflow:** `search_and_read` → `read_page` (specific URLs) → `web_search` (only need result lists)

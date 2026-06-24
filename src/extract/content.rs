@@ -1,4 +1,5 @@
 use rs_trafilatura::{Options, extract_with_options};
+use crate::browser::interaction::signals;
 
 pub struct ContentExtractor;
 
@@ -26,22 +27,6 @@ impl ExtractedContent {
     }
 }
 
-const CAPTCHA_CONTENT_SIGNALS: &[&str] = &[
-    "百度安全验证", "安全验证", "请完成验证", "请完成下方验证",
-    "网络不给力", "图片未转正", "正在验证",
-    "unusual traffic", "are not a robot", "captcha",
-    "verify you are human", "one last step",
-    "人机验证", "异常流量",
-    "access denied", "403 forbidden",
-    "没有知识存在的荒原",
-    "你的登录状态已失效",
-    "请先登录",
-    "login required",
-    "sign in to continue",
-    "请登录后查看",
-    "登录后可查看",
-];
-
 impl ContentExtractor {
     pub fn extract(html: &str, _url: &str, max_length: usize) -> anyhow::Result<ExtractedContent> {
         let options = Options {
@@ -63,7 +48,7 @@ impl ContentExtractor {
 
         let content_lower = content.to_lowercase();
         let title_lower = title.to_lowercase();
-        for signal in CAPTCHA_CONTENT_SIGNALS {
+        for signal in signals::all_block_signals() {
             if content_lower.contains(signal) || title_lower.contains(signal) {
                 return Ok(ExtractedContent {
                     title,
