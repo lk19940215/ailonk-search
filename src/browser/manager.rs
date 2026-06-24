@@ -263,10 +263,17 @@ impl BrowserManager {
         if let Ok(ws_url) = wait_for_debug_port(port, 1).await {
             tracing::info!("Detected existing Chrome on port {}, connecting...", port);
             let mut config = StealthConfig::live();
-            config.cdp_timeout = 60;
-            let browser = Browser::connect_with_config(&ws_url, config).await
-                .map_err(|e| anyhow::anyhow!("Failed to connect to existing Chrome: {}", e))?;
-            return Ok(Self::from_browser(browser, ConnectionMode::UserChrome, args.max_tabs, None, Some(ws_url)));
+            config.cdp_timeout = 10;
+            match Browser::connect_with_config(&ws_url, config).await {
+                Ok(browser) => {
+                    return Ok(Self::from_browser(browser, ConnectionMode::UserChrome, args.max_tabs, None, Some(ws_url)));
+                }
+                Err(e) => {
+                    tracing::warn!("Orphan Chrome on port {} is unresponsive ({}), killing...", port, e);
+                    kill_process_on_port(port).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
         }
 
         let mut cmd = std::process::Command::new(&chrome_path);
@@ -500,6 +507,74 @@ pub fn find_chrome_path(cli_path: &Option<String>) -> Option<String> {
         }
     }
     None
+}
+
+/// Kill processes listening on a port. Sends SIGTERM first, waits, then SIGKILL if needed.
+pub async fn kill_process_on_port(port: u16) {
+    #[cfg(unix)]
+    {
+        let output = tokio::process::Command::new("lsof")
+            .args(["-ti", &format!(":{}", port)])
+            .output()
+            .await;
+        let pids: Vec<String> = match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            Err(e) => {
+                tracing::warn!(port, error = %e, "lsof failed, cannot find processes on port");
+                return;
+            }
+        };
+        if pids.is_empty() {
+            return;
+        }
+
+        for pid in &pids {
+            let _ = tokio::process::Command::new("kill")
+                .args(["-TERM", pid])
+                .output()
+                .await;
+            tracing::info!(pid, port, "Sent SIGTERM to process on debug port");
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await.is_ok() {
+            for pid in &pids {
+                let _ = tokio::process::Command::new("kill")
+                    .args(["-9", pid])
+                    .output()
+                    .await;
+                tracing::warn!(pid, port, "SIGTERM insufficient, sent SIGKILL");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+    #[cfg(windows)]
+    {
+        let output = tokio::process::Command::new("netstat")
+            .args(["-aon"])
+            .output()
+            .await;
+        if let Ok(out) = output {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let needle = format!(":{}", port);
+            for line in text.lines() {
+                if line.contains(&needle) && line.contains("LISTENING") {
+                    if let Some(pid) = line.split_whitespace().last() {
+                        let _ = tokio::process::Command::new("taskkill")
+                            .args(["/F", "/PID", pid])
+                            .output()
+                            .await;
+                        tracing::info!(pid, port, "Killed process on debug port (Windows)");
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn wait_for_debug_port(port: u16, timeout_secs: u64) -> anyhow::Result<String> {

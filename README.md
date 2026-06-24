@@ -97,7 +97,7 @@ npx ailonk-search setup
 ailonk-search setup
 ```
 
-`setup` 会创建独立的调试 Chrome Profile（端口 19222），不影响正常浏览器使用。登录态过期时可运行 `ailonk-search sync` 或通过 MCP 工具 `sync_login` 自动刷新。
+`setup` 会创建独立的调试 Chrome Profile（端口 19222），不影响正常浏览器使用，**可通过 MCP 正常集成**。登录态过期时可运行 `ailonk-search sync` 或通过 MCP 工具 `sync_login` 刷新；但 `sync_login` **无法**传递 Google OAuth 会话（Chrome 对 OAuth Cookie 的加密保护），Google 授权需在调试 Profile 中手动完成首次登录，或改用 AutoConnect 模式。
 
 **选择 Headless 模式**（零配置，直接跳到第 3 步）：
 
@@ -177,20 +177,32 @@ ailonk-search setup
 | `read_page` | 读取指定 URL，提取为 Markdown | `url`, `include_links`, `max_length` |
 | `batch_read` | 并发读取最多 10 个 URL | `urls`, `max_length_per_page`, `concurrency` |
 | `screenshot` | 截图（返回 base64 或保存文件）。文本内容请用 `read_page` | `url`, `format`, `file_path` |
-| `click_authorize` | 自动识别并点击 OAuth/SSO 授权页面（Google OAuth、账号选择、SAML 等） | `url`, `timeout` |
-| `sync_login` | 从主 Chrome 同步登录态到调试 Profile（仅 UserChrome 模式需要，AutoConnect 模式不需要） | 无参数 |
+| `click_authorize` | 自动识别并点击 OAuth/SSO 授权页面（SSO 按钮、同意页、SAML、弹窗、多步重定向） | `url`, `timeout` |
+| `sync_login` | 从主 Chrome 同步登录态到调试 Profile（仅 UserChrome 模式；无法同步 Google OAuth 会话） | 无参数 |
 
 **推荐工作流**：`search_and_read` → `read_page`（深入特定 URL）→ `web_search`（仅需结果列表时）
 
-**授权失败处理**：`read_page` 返回 `[READ_FAILED]` 时 → 先尝试 `click_authorize`（处理 OAuth 授权弹窗）→ 若仍失败则 `sync_login`（刷新 Cookie/Session）
+**授权失败处理**：`read_page` 返回 `[READ_FAILED]` 时 → 先尝试 `click_authorize`（OAuth/SSO 授权页）→ 若仍失败且为 Cookie/Session 过期，在 UserChrome 模式下尝试 `sync_login`（Google OAuth 会话无法同步，需手动授权或改用 AutoConnect）
 
 ### click_authorize — OAuth/SSO 授权
 
 自动识别并点击授权页面上的按钮，完成 OAuth/SSO 登录流程。适用于 `read_page` 因授权拦截返回 `[READ_FAILED]` 的场景。
 
-**适用**：Google OAuth 同意页、Google 账号选择、Google SAML SSO、企业自定义 SSO、通用登录页（含可检测的登录/SSO 按钮）、多步授权流程（如 SSO → Google → 回跳）
+**能力**：
 
-**不适用**：Cookie/Session 过期（UserChrome 模式请用 `sync_login`）、用户名密码登录、CAPTCHA、多因素认证
+- 点击 SSO/登录按钮（如 "AKULAKU SSO 登录"、"Sign in with Google" 等）
+- 处理 OAuth/SSO 弹窗（popup）
+- 管理多步 SSO 重定向链
+- 处理 Google SAML SSO 页面
+- 网页版 Google 账号选择（`accounts.google.com` 页面跳转形式）
+- 回头用户：Chrome 的 FedCM auto-reauthn 可自动完成认证（工具负责触发流程）
+
+**限制（CDP 架构）**：
+
+- **无法**处理 FedCM 浏览器原生弹窗（Chrome 顶层 UI 账号选择器，非网页 DOM，CDP 无法拦截）
+- 首次使用 FedCM 的站点：用户需先在 Chrome 中手动完成一次 Google 授权，之后 auto-reauthn 可自动处理
+
+**不适用**：Cookie/Session 过期（UserChrome 模式请用 `sync_login`，但 Google OAuth 除外）、用户名密码登录、CAPTCHA、多因素认证
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -264,7 +276,9 @@ ailonk-search setup
 ### UserChrome 模式
 
 - 连接（或启动）真实 Chrome 实例，使用 `~/.ailonk-search-profile` 独立配置
-- 通过 `sync` 命令或 MCP `sync_login` 工具从主 Chrome 同步登录态
+- **支持 MCP 集成**（配置方式与 AutoConnect/Headless 相同）
+- 通过 `sync` 命令或 MCP `sync_login` 工具从主 Chrome 同步登录态（Cookies、localStorage 等）
+- `sync_login` **无法**同步 Google OAuth 会话（Chrome Cookie 加密限制）；Google 服务需在调试 Profile 中手动完成首次授权，或改用 AutoConnect
 - 使用调试端口 **19222**，与正常 Chrome 共存
 - 默认引擎：**Google**（全球）或 **Bing cn**（中国）
 - 请求间隔：2 秒

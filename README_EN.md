@@ -98,7 +98,7 @@ npx ailonk-search setup
 ailonk-search setup
 ```
 
-`setup` creates a dedicated debug Chrome profile on port 19222. It won't affect your normal browser. When login state expires, run `ailonk-search sync` or use the MCP tool `sync_login` to refresh.
+`setup` creates a dedicated debug Chrome profile on port 19222. It won't affect your normal browser and **works with MCP integration**. When login state expires, run `ailonk-search sync` or use the MCP tool `sync_login` to refresh; however, `sync_login` **cannot** transfer Google OAuth sessions (Chrome encrypts OAuth cookies), so Google auth must be completed manually once in the debug profile, or use AutoConnect mode instead.
 
 **Headless mode** (zero-config, skip to step 3):
 
@@ -178,20 +178,32 @@ Edit `~/.claude/settings.json` or project `.mcp.json`:
 | `read_page` | Fetch a single URL and extract clean Markdown. | `url`, `include_links` (default true), `max_length` (default 15000) |
 | `batch_read` | Read up to 10 URLs concurrently. | `urls`, `max_length_per_page` (default 5000), `concurrency` (default 5, max 10) |
 | `screenshot` | Capture a page as PNG/JPEG (base64 or file). Prefer `read_page` for text. | `url`, `format` (png/jpeg), `file_path` (optional) |
-| `click_authorize` | Detect and click through OAuth/SSO authorization pages (Google OAuth, account selection, SAML, etc.) | `url`, `timeout` (default: 30s) |
-| `sync_login` | Sync login state from main Chrome to debug profile. Only needed in UserChrome mode; not required in AutoConnect mode. | No parameters |
+| `click_authorize` | Detect and click OAuth/SSO authorization pages (SSO buttons, consent pages, SAML, popups, multi-step redirects) | `url`, `timeout` (default: 30s) |
+| `sync_login` | Sync login state from main Chrome to debug profile (UserChrome only; cannot sync Google OAuth sessions) | No parameters |
 
 **Recommended workflow:** `search_and_read` → `read_page` (specific URLs) → `web_search` (only need result lists)
 
-**Auth failure handling:** When `read_page` returns `[READ_FAILED]` → try `click_authorize` first (OAuth/SSO consent pages) → if still failing, call `sync_login` (refresh cookies/sessions)
+**Auth failure handling:** When `read_page` returns `[READ_FAILED]` → try `click_authorize` first (OAuth/SSO pages) → if still failing due to expired cookies/sessions, call `sync_login` in UserChrome mode (Google OAuth sessions cannot be synced — manual auth or AutoConnect required)
 
 ### click_authorize — OAuth/SSO Authorization
 
 Detects and clicks through authorization pages to complete OAuth/SSO login flows. Use when `read_page` returns `[READ_FAILED]` because the page requires authorization.
 
-**Use for:** Google OAuth consent, Google account selection, Google SAML SSO, custom corporate SSO (e.g. Google Sign-In), generic login pages with a detectable login/SSO button, multi-step auth flows (e.g. SSO → Google → redirect back)
+**Capabilities:**
 
-**Not for:** Expired cookies/sessions (use `sync_login` in UserChrome mode), username/password login, CAPTCHA, or multi-factor authentication
+- Click SSO/login buttons (e.g. "AKULAKU SSO Login", "Sign in with Google")
+- Handle OAuth/SSO popups
+- Manage multi-step SSO redirect chains
+- Handle Google SAML SSO pages
+- Web-based Google account selection (`accounts.google.com` page redirects)
+- Returning users: Chrome FedCM auto-reauthn may complete authentication after the tool triggers the flow
+
+**Limitations (CDP architecture):**
+
+- **Cannot** interact with the FedCM browser-native popup (Chrome top-level UI account picker — not DOM, not accessible via CDP)
+- For sites using FedCM for the first time: user must manually complete Google authorization once, after which auto-reauthn handles subsequent authorizations
+
+**Not for:** Expired cookies/sessions (use `sync_login` in UserChrome mode, except Google OAuth), username/password login, CAPTCHA, or multi-factor authentication
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -267,7 +279,9 @@ Global CLI flags (apply to all subcommands):
 ### UserChrome
 
 - Connects to (or launches) a real Chrome instance with profile at `~/.ailonk-search-profile`
-- Sync login state via `sync` command or MCP `sync_login` tool
+- **MCP integration supported** (same config as AutoConnect/Headless)
+- Sync login state via `sync` command or MCP `sync_login` tool (cookies, localStorage, etc.)
+- `sync_login` **cannot** sync Google OAuth sessions (Chrome cookie encryption); Google services require manual first-time auth in the debug profile, or use AutoConnect
 - Runs on debug port **19222** — coexists with normal Chrome
 - Default engine: **Google** (global) or **Bing cn** (China)
 - Rate limit: 2 s between search requests

@@ -52,33 +52,7 @@ impl SearchServer {
 
     /// Kill the debug Chrome process on port 19222 so cookie files can be safely overwritten.
     async fn kill_debug_chrome(&self) {
-        #[cfg(unix)]
-        {
-            let output = tokio::process::Command::new("lsof")
-                .args(["-ti", ":19222"])
-                .output()
-                .await;
-            if let Ok(out) = output {
-                let pids = String::from_utf8_lossy(&out.stdout);
-                for pid_str in pids.lines() {
-                    let pid = pid_str.trim();
-                    if !pid.is_empty() {
-                        let _ = tokio::process::Command::new("kill")
-                            .args(["-TERM", pid])
-                            .output()
-                            .await;
-                        tracing::info!(pid, "Sent SIGTERM to debug Chrome");
-                    }
-                }
-            }
-        }
-        #[cfg(windows)]
-        {
-            let _ = tokio::process::Command::new("taskkill")
-                .args(["/F", "/FI", "WINDOWTITLE eq *--remote-debugging-port=19222*"])
-                .output()
-                .await;
-        }
+        crate::browser::manager::kill_process_on_port(19222).await;
     }
 
     fn check_cdp_error<T>(&self, result: &Result<T, ErrorData>, bm: &BrowserManager) {
@@ -617,12 +591,11 @@ impl SearchServer {
         }
     }
 
-    #[tool(description = "Detect and click through authorization pages (Google OAuth, SSO, account selection, generic login) for a URL. \
-        Use when read_page returns [READ_FAILED] on a page that requires OAuth/SSO authorization — not just expired cookies (use sync_login for that). \
-        After successful authorization, retry read_page on the same URL. \
-        Handles: Google OAuth consent, Google account selection, Google SAML SSO, generic OAuth, \
-        custom SSO pages, generic login pages (any page with a login/SSO button), and authorization popups. \
-        Does NOT handle: username/password login (use sync_login), CAPTCHA (handled by read_page), or multi-factor authentication.")]
+    #[tool(description = "Detect and click OAuth/SSO authorization flows (SSO buttons, consent pages, SAML, popups, multi-step redirects). \
+        Use when read_page returns [READ_FAILED] on OAuth/SSO pages — not expired cookies (use sync_login). \
+        Returning Google users: Chrome FedCM auto-reauthn may complete after the tool triggers the flow. \
+        Limitation (CDP): cannot interact with first-time Google FedCM account picker — user must complete initial Google auth manually in Chrome once. \
+        Does NOT handle: username/password login, CAPTCHA, or multi-factor authentication.")]
     async fn click_authorize(
         &self,
         Parameters(params): Parameters<tools::ClickAuthorizeParams>,
@@ -632,9 +605,10 @@ impl SearchServer {
     }
 
     #[tool(description = "Sync login state (cookies, sessions) from user's main Chrome to the debug profile. \
-        Only works in UserChrome mode (requires initial setup with --setup flag); in AutoConnect mode the browser already shares the user's login state, so sync_login is not needed. \
-        Use when read_page returns [READ_FAILED] on a page that requires authentication, or when the user reports expired login. \
-        After syncing, the browser will reconnect automatically — retry the failed read_page call.")]
+        UserChrome mode only (requires setup); not needed in AutoConnect. \
+        Cannot transfer Google OAuth sessions (Chrome cookie encryption) — use click_authorize or manual Google sign-in in the debug profile. \
+        Use when read_page returns [READ_FAILED] due to expired cookies/sessions (non-OAuth). \
+        After syncing, the browser reconnects automatically — retry the failed read_page call.")]
     async fn sync_login(&self) -> Result<CallToolResult, ErrorData> {
         // Kill the debug Chrome process so cookie files are unlocked and
         // won't be overwritten by Chrome's shutdown flush.
@@ -678,8 +652,11 @@ impl ServerHandler for SearchServer {
                 3. read_page — read a specific URL you already have (max_length up to 15000).\n\
                 4. batch_read — read multiple known URLs concurrently (up to 10).\n\
                 5. screenshot — visual capture only; prefer read_page for text.\n\
-                6. click_authorize — handle OAuth/SSO consent pages (Google Allow button, account selection, etc.). Use when read_page fails on pages behind OAuth.\n\
-                7. sync_login — refresh browser login state from user's Chrome when pages return [READ_FAILED] due to expired cookies/sessions. Only works in UserChrome mode (not needed in AutoConnect mode).\n\
+                6. click_authorize — handle OAuth/SSO flows (SSO buttons, consent pages, SAML, popups, multi-step redirects). \
+                Use when read_page fails on OAuth/SSO pages. Returning Google users: FedCM auto-reauthn may complete after tool triggers the flow. \
+                Limitation: cannot handle first-time Google FedCM account picker (CDP) — user must manually authorize Google once in Chrome first.\n\
+                7. sync_login — refresh login state from user's Chrome when pages return [READ_FAILED] due to expired cookies/sessions. \
+                UserChrome mode only (not needed in AutoConnect). Cannot sync Google OAuth sessions (Chrome cookie encryption).\n\
                 \n\
                 QUERY CRAFTING:\n\
                 - Be specific: include entity names, versions, dates. Good: 'SpaceX IPO 2026 pricing'. Bad: 'SpaceX news'.\n\
@@ -711,10 +688,10 @@ impl ServerHandler for SearchServer {
                 - When you see [READ_FAILED], try an alternative URL from search results instead of retrying the same one.\n\
                 - Avoid reading pages from known walled sites (e.g. tieba.baidu.com, zhihu.com/question without answer) \
                 when better alternatives exist.\n\
-                - If a page requires OAuth/SSO authorization (e.g. Google OAuth consent), call click_authorize first, then retry read_page.\n\
-                - If a page requires login (expired cookies/sessions), call sync_login to refresh \
-                the browser's login state from the user's main Chrome, then retry. \
-                Note: sync_login only works in UserChrome mode; in AutoConnect mode, use click_authorize instead.\n\
+                - If a page requires OAuth/SSO authorization, call click_authorize first, then retry read_page. \
+                For first-time Google auth, user must manually complete FedCM account selection in Chrome once — CDP cannot interact with it.\n\
+                - If a page requires login (expired cookies/sessions), call sync_login to refresh login state, then retry. \
+                UserChrome mode only; not needed in AutoConnect. sync_login cannot transfer Google OAuth sessions — use click_authorize or manual Google sign-in.\n\
                 \n\
                 NOTES:\n\
                 - Results are clean Markdown, no summarization — you interpret the content.\n\

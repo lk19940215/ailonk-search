@@ -20,7 +20,32 @@ pub async fn run(args: &crate::cli::Args) -> anyhow::Result<()> {
 
         let transport = (tokio::io::stdin(), tokio::io::stdout());
         let running_server = server.serve(transport).await?;
-        running_server.waiting().await?;
+
+        #[cfg(unix)]
+        {
+            let mut sigterm = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::terminate(),
+            )?;
+            tokio::select! {
+                res = running_server.waiting() => { res?; }
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received SIGINT, shutting down...");
+                }
+                _ = sigterm.recv() => {
+                    tracing::info!("Received SIGTERM, shutting down...");
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::select! {
+                res = running_server.waiting() => { res?; }
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received SIGINT, shutting down...");
+                }
+            }
+        }
+
         Ok::<(), anyhow::Error>(())
     }
     .await;
