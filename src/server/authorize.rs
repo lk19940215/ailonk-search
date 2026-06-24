@@ -143,8 +143,8 @@ pub async fn handle_click_authorize(
                                 continue;
                             }
 
-                            // Wait for redirect (Chrome handles FedCM natively, auto-selects account)
-                            // Poll URL frequently for fast detection instead of fixed waits
+                            // Wait for redirect: Chrome handles FedCM natively (auto-reauthn
+                            // for returning users). Poll URL frequently for fast detection.
                             let mut redirected = false;
                             let redirect_deadline = tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(12);
