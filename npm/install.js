@@ -13,6 +13,17 @@ const MAX_REDIRECTS = 5;
 const TIMEOUT_MS = 60_000;
 const VERSION_TAG_RE = /^v?\d+\.\d+\.\d+(-[\w.-]+)?$/i;
 
+function compareVersions(a, b) {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = pa[i] || 0;
+    const nb = pb[i] || 0;
+    if (na !== nb) return na - nb;
+  }
+  return 0;
+}
+
 function getPlatformTarget() {
   const map = {
     "darwin-arm64": "aarch64-apple-darwin",
@@ -186,6 +197,10 @@ async function main() {
       console.log(`${BIN_NAME} v${version} already installed`);
       return;
     }
+    if (compareVersions(installed, version) > 0) {
+      console.log(`${BIN_NAME} v${installed} is newer than target v${version}, skipping`);
+      return;
+    }
   }
 
   const rawUrl = `https://github.com/${REPO}/releases/download/${tag}/${assetName}`;
@@ -221,7 +236,10 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err.message);
-  process.exit(1);
-});
+main().then(
+  () => process.exit(0),
+  (err) => {
+    console.error(err.message);
+    process.exit(1);
+  }
+);
