@@ -179,7 +179,7 @@ Edit `~/.claude/settings.json` or project `.mcp.json`:
 | `batch_read` | Read up to 10 URLs concurrently. | `urls`, `max_length_per_page` (default 5000), `concurrency` (default 5, max 10) |
 | `screenshot` | Capture a page as PNG/JPEG (base64 or file). Prefer `read_page` for text. | `url`, `format` (png/jpeg), `file_path` (optional) |
 | `click_authorize` | Detect and click through OAuth/SSO authorization pages (Google OAuth, account selection, SAML, etc.) | `url`, `timeout` (default: 30s) |
-| `sync_login` | Sync login state from main Chrome to debug profile. Use when `read_page` returns `[READ_FAILED]` on auth-required pages. | No parameters |
+| `sync_login` | Sync login state from main Chrome to debug profile. Only needed in UserChrome mode; not required in AutoConnect mode. | No parameters |
 
 **Recommended workflow:** `search_and_read` → `read_page` (specific URLs) → `web_search` (only need result lists)
 
@@ -191,7 +191,7 @@ Detects and clicks through authorization pages to complete OAuth/SSO login flows
 
 **Use for:** Google OAuth consent, Google account selection, Google SAML SSO, custom corporate SSO (e.g. Google Sign-In), generic login pages with a detectable login/SSO button, multi-step auth flows (e.g. SSO → Google → redirect back)
 
-**Not for:** Expired cookies/sessions (use `sync_login`), username/password login, CAPTCHA, or multi-factor authentication
+**Not for:** Expired cookies/sessions (use `sync_login` in UserChrome mode), username/password login, CAPTCHA, or multi-factor authentication
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

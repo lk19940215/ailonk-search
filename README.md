@@ -178,7 +178,7 @@ ailonk-search setup
 | `batch_read` | 并发读取最多 10 个 URL | `urls`, `max_length_per_page`, `concurrency` |
 | `screenshot` | 截图（返回 base64 或保存文件）。文本内容请用 `read_page` | `url`, `format`, `file_path` |
 | `click_authorize` | 自动识别并点击 OAuth/SSO 授权页面（Google OAuth、账号选择、SAML 等） | `url`, `timeout` |
-| `sync_login` | 从主 Chrome 同步登录态到调试 Profile（AI 可自动调用） | 无参数 |
+| `sync_login` | 从主 Chrome 同步登录态到调试 Profile（仅 UserChrome 模式需要，AutoConnect 模式不需要） | 无参数 |
 
 **推荐工作流**：`search_and_read` → `read_page`（深入特定 URL）→ `web_search`（仅需结果列表时）
 
@@ -190,7 +190,7 @@ ailonk-search setup
 
 **适用**：Google OAuth 同意页、Google 账号选择、Google SAML SSO、企业自定义 SSO、通用登录页（含可检测的登录/SSO 按钮）、多步授权流程（如 SSO → Google → 回跳）
 
-**不适用**：Cookie/Session 过期（请用 `sync_login`）、用户名密码登录、CAPTCHA、多因素认证
+**不适用**：Cookie/Session 过期（UserChrome 模式请用 `sync_login`）、用户名密码登录、CAPTCHA、多因素认证
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|

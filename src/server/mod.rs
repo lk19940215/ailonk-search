@@ -621,7 +621,7 @@ impl SearchServer {
         Use when read_page returns [READ_FAILED] on a page that requires OAuth/SSO authorization — not just expired cookies (use sync_login for that). \
         After successful authorization, retry read_page on the same URL. \
         Handles: Google OAuth consent, Google account selection, Google SAML SSO, generic OAuth, \
-        custom SSO pages, generic login pages (any page with a login/SSO button), FedCM browser dialogs, and authorization popups. \
+        custom SSO pages, generic login pages (any page with a login/SSO button), and authorization popups. \
         Does NOT handle: username/password login (use sync_login), CAPTCHA (handled by read_page), or multi-factor authentication.")]
     async fn click_authorize(
         &self,
@@ -631,7 +631,10 @@ impl SearchServer {
         authorize::handle_click_authorize(bm, params, self.allow_private_urls).await
     }
 
-    #[tool(description = "Sync login state (cookies, sessions) from user's main Chrome to the debug profile. Use when read_page returns [READ_FAILED] on a page that requires authentication, or when the user reports expired login. After syncing, the browser will reconnect automatically — retry the failed read_page call.")]
+    #[tool(description = "Sync login state (cookies, sessions) from user's main Chrome to the debug profile. \
+        Only works in UserChrome mode (requires initial setup with --setup flag); in AutoConnect mode the browser already shares the user's login state, so sync_login is not needed. \
+        Use when read_page returns [READ_FAILED] on a page that requires authentication, or when the user reports expired login. \
+        After syncing, the browser will reconnect automatically — retry the failed read_page call.")]
     async fn sync_login(&self) -> Result<CallToolResult, ErrorData> {
         // Kill the debug Chrome process so cookie files are unlocked and
         // won't be overwritten by Chrome's shutdown flush.
@@ -676,7 +679,7 @@ impl ServerHandler for SearchServer {
                 4. batch_read — read multiple known URLs concurrently (up to 10).\n\
                 5. screenshot — visual capture only; prefer read_page for text.\n\
                 6. click_authorize — handle OAuth/SSO consent pages (Google Allow button, account selection, etc.). Use when read_page fails on pages behind OAuth.\n\
-                7. sync_login — refresh browser login state from user's Chrome when pages return [READ_FAILED] due to expired cookies/sessions.\n\
+                7. sync_login — refresh browser login state from user's Chrome when pages return [READ_FAILED] due to expired cookies/sessions. Only works in UserChrome mode (not needed in AutoConnect mode).\n\
                 \n\
                 QUERY CRAFTING:\n\
                 - Be specific: include entity names, versions, dates. Good: 'SpaceX IPO 2026 pricing'. Bad: 'SpaceX news'.\n\
@@ -710,7 +713,8 @@ impl ServerHandler for SearchServer {
                 when better alternatives exist.\n\
                 - If a page requires OAuth/SSO authorization (e.g. Google OAuth consent), call click_authorize first, then retry read_page.\n\
                 - If a page requires login (expired cookies/sessions), call sync_login to refresh \
-                the browser's login state from the user's main Chrome, then retry.\n\
+                the browser's login state from the user's main Chrome, then retry. \
+                Note: sync_login only works in UserChrome mode; in AutoConnect mode, use click_authorize instead.\n\
                 \n\
                 NOTES:\n\
                 - Results are clean Markdown, no summarization — you interpret the content.\n\

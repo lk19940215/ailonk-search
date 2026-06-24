@@ -517,7 +517,7 @@ pub async fn try_sso_click(page: &Page) -> bool {
     ]).await;
     if clicked { return true; }
 
-    // 2. Try Google Sign-In iframe (triggers FedCM)
+    // 2. Try Google Sign-In iframe
     if try_google_signin_iframe(page).await { return true; }
 
     // 3. Fallback: generic auth button scoring (for non-Google SSO like "AKULAKU SSO 登录")
