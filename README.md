@@ -217,7 +217,7 @@ Cursor 不继承 shell 环境变量，需使用完整路径：
 
 **能力**：
 
-- 点击 SSO/登录按钮（如 "AKULAKU SSO 登录"、"Sign in with Google" 等）
+- 点击 SSO/登录按钮（如 "*** SSO 登录"、"Sign in with Google" 等）
 - 处理 OAuth/SSO 弹窗（popup）
 - 管理多步 SSO 重定向链
 - 处理 Google SAML SSO 页面

@@ -647,7 +647,7 @@ pub async fn try_sso_click(page: &Page) -> bool {
     // 2. Try Google Sign-In iframe
     if try_google_signin_iframe(page).await { return true; }
 
-    // 3. Fallback: generic auth button scoring (for non-Google SSO like "AKULAKU SSO 登录")
+    // 3. Fallback: generic auth button scoring (for non-Google SSO like "*** SSO 登录")
     if click_best_auth_button(page).await { return true; }
 
     // 4. Last resort: generic form submission

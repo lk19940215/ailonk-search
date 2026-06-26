@@ -218,7 +218,7 @@ Detects and clicks through authorization pages to complete OAuth/SSO login flows
 
 **Capabilities:**
 
-- Click SSO/login buttons (e.g. "AKULAKU SSO Login", "Sign in with Google")
+- Click SSO/login buttons (e.g. "*** SSO Login", "Sign in with Google")
 - Handle OAuth/SSO popups
 - Manage multi-step SSO redirect chains
 - Handle Google SAML SSO pages
