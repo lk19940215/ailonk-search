@@ -10,7 +10,7 @@
 
 ## Features
 
-- **7 MCP tools** — `search_and_read` (recommended), `web_search`, `read_page`, `batch_read`, `screenshot`, `click_authorize`, `sync_login`
+- **8 MCP tools** — `search_and_read` (recommended), `web_search`, `read_page`, `batch_read`, `screenshot`, `click_authorize`, `handle_popup`, `sync_login`
 - **Anti-bot stealth** — powered by [eoka](https://crates.io/crates/eoka): binary patching, human-like mouse input, and consistent fingerprints; search queries inserted via CDP insertText (~50x faster than per-character typing)
 - **Google snippet extraction** — structured DOM fallback for more reliable search snippets
 - **Three connection modes** — **AutoConnect** ⭐ (Chrome 144+, uses main browser with all login state), **UserChrome** (dedicated debug profile), **Headless** (zero-config)
@@ -204,7 +204,8 @@ Edit `~/.claude/settings.json` or project `.mcp.json`:
 | `read_page` | Fetch a single URL and extract clean Markdown. | `url`, `include_links` (default true), `max_length` (default 15000) |
 | `batch_read` | Read up to 10 URLs concurrently. | `urls`, `max_length_per_page` (default 5000), `concurrency` (default 5, max 10) |
 | `screenshot` | Capture a page as PNG/JPEG (base64 or file). Prefer `read_page` for text. | `url`, `format` (png/jpeg), `file_path` (optional) |
-| `click_authorize` | Detect and click OAuth/SSO authorization pages (SSO buttons, consent pages, SAML, popups, multi-step redirects) | `url`, `timeout` (default: 30s) |
+| `click_authorize` | Detect and click OAuth/SSO authorization pages (SSO buttons, consent pages, SAML, popups, multi-step redirects) | `url`, `timeout` (default: 30s), `preferred_account` |
+| `handle_popup` | General-purpose popup/new-tab handler. Three modes: (1) Auth popup auto-handle (2) Non-auth popup click (3) Observe only | `url`, `trigger`, `popup_click`, `preferred_account`, `timeout` |
 | `sync_login` | Sync login state from main Chrome to debug profile (UserChrome only; cannot sync Google OAuth sessions) | No parameters |
 
 **Recommended workflow:** `search_and_read` → `read_page` (specific URLs) → `web_search` (only need result lists)
@@ -235,6 +236,7 @@ Detects and clicks through authorization pages to complete OAuth/SSO login flows
 |-----------|------|---------|-------------|
 | `url` | string | required | URL that requires authorization |
 | `timeout` | uint | 30 | Max seconds to wait for the auth flow to complete |
+| `preferred_account` | string | — | Preferred account for selection (e.g. "user@company.com" or "@company.com"; falls back to `PREFERRED_ACCOUNT` env var) |
 
 **Flow:** Navigate → detect auth type → click button → wait for Chrome to handle natively → redirect
 
@@ -257,6 +259,27 @@ Detects and clicks through authorization pages to complete OAuth/SSO login flows
 2. click_authorize("https://docs.google.com/...")  →  authorization succeeded
 3. read_page("https://docs.google.com/...")  →  returns Markdown content
 ```
+
+### handle_popup — General Popup Handler
+
+General-purpose popup/new-tab handler. Use when a page action opens a new tab.
+
+**Three modes:**
+
+1. **Auth popup** — Auto-detect Google account selection, OAuth consent, SAML, and handle automatically
+2. **Non-auth popup** — Click a specified element in the popup via `popup_click` (e.g. confirm dialogs, consent buttons)
+3. **Observe only** — Detect popup without `popup_click` and return content preview
+
+**When to use handle_popup vs click_authorize:** `click_authorize` handles the full SSO flow in one call (detect → click SSO button → handle popup → return). `handle_popup` gives finer control: custom trigger elements, preferred account selection, and non-auth popup interaction.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `url` | string | required | URL of the page where a popup is expected |
+| `trigger` | string | — | Element that triggers the popup (CSS selector or button text) |
+| `popup_url_contains` | string | — | Only handle popups whose URL contains this string |
+| `preferred_account` | string | — | Preferred account for auth popups |
+| `popup_click` | string | — | Element to click in non-auth popups |
+| `timeout` | uint | 30 | Max seconds to wait for popup appearance and completion |
 
 ---
 

@@ -10,7 +10,7 @@
 
 ## 核心特性
 
-- **7 个 MCP 工具** — `search_and_read`（推荐）、`web_search`、`read_page`、`batch_read`、`screenshot`、`click_authorize`、`sync_login`
+- **8 个 MCP 工具** — `search_and_read`（推荐）、`web_search`、`read_page`、`batch_read`、`screenshot`、`click_authorize`、`handle_popup`、`sync_login`
 - **反爬虫保护** — 基于 [eoka](https://crates.io/crates/eoka)：二进制补丁 + 指纹一致性 + 类人鼠标操作；搜索输入通过 CDP insertText 一次性插入（~50x 提速）
 - **Google snippet 提取** — 结构化 DOM fallback，搜索摘要更可靠
 - **三种运行模式** — **AutoConnect** ⭐（Chrome 144+，直接使用主浏览器所有登录态）、**UserChrome**（独立调试 Profile）、**Headless**（零配置）
@@ -203,7 +203,8 @@ Cursor 不继承 shell 环境变量，需使用完整路径：
 | `read_page` | 读取指定 URL，提取为 Markdown | `url`, `include_links`, `max_length` |
 | `batch_read` | 并发读取最多 10 个 URL | `urls`, `max_length_per_page`, `concurrency` |
 | `screenshot` | 截图（返回 base64 或保存文件）。文本内容请用 `read_page` | `url`, `format`, `file_path` |
-| `click_authorize` | 自动识别并点击 OAuth/SSO 授权页面（SSO 按钮、同意页、SAML、弹窗、多步重定向） | `url`, `timeout` |
+| `click_authorize` | 自动识别并点击 OAuth/SSO 授权页面（SSO 按钮、同意页、SAML、弹窗、多步重定向） | `url`, `timeout`, `preferred_account` |
+| `handle_popup` | 通用弹窗处理工具。三种模式：(1) Auth 弹窗自动处理 (2) 非 Auth 弹窗点击指定元素 (3) 仅观察 | `url`, `trigger`, `popup_click`, `preferred_account`, `timeout` |
 | `sync_login` | 从主 Chrome 同步登录态到调试 Profile（仅 UserChrome 模式；无法同步 Google OAuth 会话） | 无参数 |
 
 **推荐工作流**：`search_and_read` → `read_page`（深入特定 URL）→ `web_search`（仅需结果列表时）
@@ -234,6 +235,7 @@ Cursor 不继承 shell 环境变量，需使用完整路径：
 |------|------|--------|------|
 | `url` | string | 必填 | 需要授权的页面 URL |
 | `timeout` | uint | 30 | 等待授权流程完成的最长时间（秒） |
+| `preferred_account` | string | — | 优先选择的账号（如 "user@company.com" 或 "@company.com"，回退到 `PREFERRED_ACCOUNT` 环境变量） |
 
 **流程**：导航到 URL → 检测授权类型 → 点击按钮 → 等待 Chrome 原生处理 → 重定向完成
 
@@ -256,6 +258,27 @@ Cursor 不继承 shell 环境变量，需使用完整路径：
 2. click_authorize("https://docs.google.com/...")  →  授权成功
 3. read_page("https://docs.google.com/...")  →  返回正文 Markdown
 ```
+
+### handle_popup — 通用弹窗处理
+
+通用弹窗/新标签页处理工具。当页面操作打开新标签页时使用。
+
+**三种模式**：
+
+1. **Auth 弹窗** — 自动检测 Google 账号选择、OAuth 同意、SAML 并自动处理
+2. **非 Auth 弹窗** — 通过 `popup_click` 参数点击弹窗中的指定元素（如确认对话框、同意按钮）
+3. **仅观察** — 不指定 `popup_click`，检测弹窗并返回内容预览
+
+**何时使用 handle_popup vs click_authorize**：`click_authorize` 用于完整 SSO 流程（一次调用完成检测 → 点击 SSO 按钮 → 处理弹窗 → 返回）。`handle_popup` 用于更精细的控制：自定义触发元素、指定账号选择、非认证弹窗交互。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `url` | string | 必填 | 期望出现弹窗的页面 URL |
+| `trigger` | string | — | 触发弹窗的元素（CSS 选择器或按钮文本） |
+| `popup_url_contains` | string | — | 仅处理 URL 包含此字符串的弹窗 |
+| `preferred_account` | string | — | Auth 弹窗时优先选择的账号 |
+| `popup_click` | string | — | 非 Auth 弹窗时要点击的元素 |
+| `timeout` | uint | 30 | 等待弹窗出现和完成的最长时间（秒） |
 
 ---
 
