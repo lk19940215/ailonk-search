@@ -11,30 +11,15 @@ use crate::search::engine::to_mcp_error;
 use super::is_fatal_cdp_error_anyhow;
 use super::tools;
 
-/// Hard ceiling: even if internal timeouts fail (e.g. CDP hangs),
-/// the handler WILL return, releasing the TabGuard and semaphore permit.
-const HANDLER_HARD_TIMEOUT_BUFFER_SECS: u64 = 15;
-
 /// Run the click_authorize flow: navigate, detect auth pages, handle popups and SSO loops.
+/// Note: outer `with_hard_timeout` in mod.rs provides spawn-isolated timeout + unhealthy marking.
 pub async fn handle_click_authorize(
     bm: Arc<BrowserManager>,
     params: tools::ClickAuthorizeParams,
     allow_private_urls: bool,
 ) -> Result<CallToolResult, ErrorData> {
     interaction::validate_url(&params.url, allow_private_urls).map_err(to_mcp_error)?;
-
-    let hard_timeout = std::time::Duration::from_secs(
-        params.timeout + HANDLER_HARD_TIMEOUT_BUFFER_SECS,
-    );
-
-    match tokio::time::timeout(hard_timeout, click_authorize_inner(bm.clone(), params, allow_private_urls)).await {
-        Ok(result) => result,
-        Err(_) => {
-            tracing::error!("click_authorize hard timeout — CDP may be unresponsive");
-            bm.mark_unhealthy();
-            Err(to_mcp_error("Authorization timed out. Browser connection may be lost — it will auto-reconnect on next call."))
-        }
-    }
+    click_authorize_inner(bm, params, allow_private_urls).await
 }
 
 async fn click_authorize_inner(

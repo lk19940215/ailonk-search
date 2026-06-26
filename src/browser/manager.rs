@@ -113,10 +113,15 @@ impl LazyBrowserManager {
     }
 
     pub async fn shutdown(&self) {
-        let mut guard = self.inner.write().await;
-        if let Some(bm) = guard.take() {
+        let _reconnect = self.reconnect_mutex.lock().await;
+        let bm = {
+            let mut guard = self.inner.write().await;
+            guard.take()
+        };
+        if let Some(bm) = bm {
             bm.shutdown().await;
         }
+        *self.cached_ws_url.write().await = None;
     }
 }
 
@@ -233,7 +238,13 @@ impl BrowserManager {
                 continue;
             }
 
-            let content = std::fs::read_to_string(&port_file).ok()?;
+            let content = match std::fs::read_to_string(&port_file) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!("{}: failed to read DevToolsActivePort: {}", name, e);
+                    continue;
+                }
+            };
             let mut lines = content.lines();
             let port: u16 = match lines.next().and_then(|l| l.trim().parse().ok()) {
                 Some(p) if p > 0 => p,

@@ -11,8 +11,6 @@ use crate::search::engine::to_mcp_error;
 use super::is_fatal_cdp_error_anyhow;
 use super::tools;
 
-const HANDLER_HARD_TIMEOUT_BUFFER_SECS: u64 = 15;
-
 /// General-purpose popup/new-tab handler.
 ///
 /// Lifecycle:
@@ -21,25 +19,15 @@ const HANDLER_HARD_TIMEOUT_BUFFER_SECS: u64 = 15;
 /// 3. Monitor for new tabs (filtered by `popup_url_contains` if set)
 /// 4. Attach to the popup, auto-detect its type, interact accordingly
 /// 5. Wait for popup to close, return results + original page state
+///
+/// Note: outer `with_hard_timeout` in mod.rs provides spawn-isolated timeout + unhealthy marking.
 pub async fn handle_popup(
     bm: Arc<BrowserManager>,
     params: tools::HandlePopupParams,
     allow_private_urls: bool,
 ) -> Result<CallToolResult, ErrorData> {
     interaction::validate_url(&params.url, allow_private_urls).map_err(to_mcp_error)?;
-
-    let hard_timeout = std::time::Duration::from_secs(
-        params.timeout + HANDLER_HARD_TIMEOUT_BUFFER_SECS,
-    );
-
-    match tokio::time::timeout(hard_timeout, handle_popup_inner(bm.clone(), params, allow_private_urls)).await {
-        Ok(result) => result,
-        Err(_) => {
-            tracing::error!("handle_popup hard timeout — CDP may be unresponsive");
-            bm.mark_unhealthy();
-            Err(to_mcp_error("Popup handling timed out. Browser connection may be lost — it will auto-reconnect on next call."))
-        }
-    }
+    handle_popup_inner(bm, params, allow_private_urls).await
 }
 
 async fn handle_popup_inner(

@@ -277,7 +277,7 @@ impl SearchServer {
         }
 
         let this = self.clone();
-        with_hard_timeout(std::time::Duration::from_secs(30), "read_page", async move {
+        with_hard_timeout(std::time::Duration::from_secs(60), "read_page", async move {
             let bm = this.get_browser().await?;
             let tab = tokio::time::timeout(TAB_ACQUIRE_TIMEOUT, bm.tab_pool().acquire())
                 .await
@@ -633,7 +633,7 @@ impl SearchServer {
         }
 
         let this = self.clone();
-        with_hard_timeout(std::time::Duration::from_secs(30), "screenshot", async move {
+        with_hard_timeout(std::time::Duration::from_secs(60), "screenshot", async move {
             let bm = this.get_browser().await?;
             let tab = tokio::time::timeout(TAB_ACQUIRE_TIMEOUT, bm.tab_pool().acquire())
                 .await
