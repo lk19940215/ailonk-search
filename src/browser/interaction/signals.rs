@@ -110,8 +110,10 @@ pub const AUTH_BUTTON_KEYWORDS: &[&str] = &[
     "授权",
     "continue with google",
     "continue with microsoft",
-    "google",
-    "microsoft",
+    "sign in with google",
+    "login with google",
+    "sign in with microsoft",
+    "login with microsoft",
     "oauth",
     "saml",
 ];

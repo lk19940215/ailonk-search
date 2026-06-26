@@ -92,9 +92,32 @@ pub struct ClickAuthorizeParams {
     /// Maximum time in seconds to wait for the authorization flow to complete (default: 30)
     #[serde(default = "default_auth_timeout")]
     pub timeout: u64,
+    /// Preferred account for account selection (e.g. "user@company.com" or "@company.com").
+    /// Falls back to PREFERRED_ACCOUNT env var if not set.
+    pub preferred_account: Option<String>,
 }
 
 fn default_auth_timeout() -> u64 { 30 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HandlePopupParams {
+    /// The URL of the page where a popup/new tab is expected.
+    pub url: String,
+    /// Optional: trigger action to cause the popup. Can be a CSS selector (e.g. "#login-btn")
+    /// or button text (e.g. "Sign in with Google"). If omitted, just monitors for popups.
+    pub trigger: Option<String>,
+    /// Optional: only handle popups whose URL contains this string (e.g. "accounts.google.com").
+    pub popup_url_contains: Option<String>,
+    /// Optional: for auth popups — preferred account email or domain (e.g. "user@company.com" or "@company.com").
+    /// Falls back to PREFERRED_ACCOUNT env var if not set.
+    pub preferred_account: Option<String>,
+    /// Optional: for non-auth popups — click an element in the popup by CSS selector or text.
+    /// Useful for confirm dialogs, consent buttons, etc.
+    pub popup_click: Option<String>,
+    /// Maximum time in seconds to wait for the popup to appear and complete (default: 30)
+    #[serde(default = "default_auth_timeout")]
+    pub timeout: u64,
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchAndReadParams {

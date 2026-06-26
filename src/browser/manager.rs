@@ -12,6 +12,10 @@ pub struct LazyBrowserManager {
     /// Cached WebSocket URL from a successful connection (AutoConnect or UserChrome),
     /// reused on reconnect to avoid re-scanning DevToolsActivePort and Chrome auth popups.
     cached_ws_url: RwLock<Option<String>>,
+    /// Serializes reconnection attempts so only one task reconnects at a time.
+    /// Unlike the RwLock on `inner`, this is only held during reconnection and
+    /// does NOT block read access to the current BrowserManager.
+    reconnect_mutex: tokio::sync::Mutex<()>,
 }
 
 impl LazyBrowserManager {
@@ -20,10 +24,18 @@ impl LazyBrowserManager {
             args: args.clone(),
             inner: RwLock::new(None),
             cached_ws_url: RwLock::new(None),
+            reconnect_mutex: tokio::sync::Mutex::new(()),
         })
     }
 
+    /// Reconnection timeout: bounds the total time `new_with_cache` can spend trying
+    /// sequential connection methods. Set long enough for users to notice and respond to
+    /// Chrome's CDP authorization popup. Fast rejection comes from eoka detecting
+    /// TCP close (not from short timeouts). `spawn_blocking` prevents runtime starvation.
+    const RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     pub async fn get(&self) -> anyhow::Result<Arc<BrowserManager>> {
+        // Fast path: return healthy cached connection (read lock only, no contention).
         {
             let guard = self.inner.read().await;
             if let Some(bm) = guard.as_ref() {
@@ -34,24 +46,54 @@ impl LazyBrowserManager {
             }
         }
 
-        let mut guard = self.inner.write().await;
+        // Slow path: acquire reconnect_mutex to ensure only one task reconnects.
+        // This is a tokio::Mutex (async), so waiting tasks yield properly and
+        // browser()'s spawn-isolated timeout can fire even while we wait here.
+        let _reconnect_guard = self.reconnect_mutex.lock().await;
 
-        if let Some(bm) = guard.as_ref() {
-            if bm.is_healthy() {
-                return Ok(bm.clone());
+        // Double-check: another task may have reconnected while we were waiting.
+        {
+            let guard = self.inner.read().await;
+            if let Some(bm) = guard.as_ref() {
+                if bm.is_healthy() {
+                    return Ok(bm.clone());
+                }
             }
         }
 
-        if let Some(old_bm) = guard.take() {
+        // Take old BM out (brief write lock, released immediately).
+        let old_bm = {
+            let mut guard = self.inner.write().await;
+            guard.take()
+        };
+
+        // Shutdown outside the write lock — even if eoka blocks, the write lock is free.
+        if let Some(old) = old_bm {
             tracing::info!("Shutting down unhealthy Chrome instance...");
-            old_bm.shutdown().await;
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                old.shutdown(),
+            ).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
 
+        // Reconnect outside the write lock — eoka's blocking I/O won't hold any lock.
         tracing::info!("Initializing Chrome...");
         let cached_url = self.cached_ws_url.read().await.clone();
-        let bm = BrowserManager::new_with_cache(&self.args, cached_url.as_deref()).await?;
+        let bm = tokio::time::timeout(
+            Self::RECONNECT_TIMEOUT,
+            BrowserManager::new_with_cache(&self.args, cached_url.as_deref()),
+        )
+        .await
+        .map_err(|_| {
+            tracing::error!("Chrome reconnection timed out ({}s)", Self::RECONNECT_TIMEOUT.as_secs());
+            anyhow::anyhow!(
+                "Chrome reconnection timed out after {}s. Chrome may be unresponsive or rejecting connections.",
+                Self::RECONNECT_TIMEOUT.as_secs()
+            )
+        })??;
 
+        // Store new BM (brief write lock).
         {
             let mut cache = self.cached_ws_url.write().await;
             if let Some(url) = &bm.connected_ws_url {
@@ -63,7 +105,10 @@ impl LazyBrowserManager {
         }
 
         let bm = Arc::new(bm);
-        *guard = Some(bm.clone());
+        {
+            let mut guard = self.inner.write().await;
+            *guard = Some(bm.clone());
+        }
         Ok(bm)
     }
 
@@ -91,6 +136,28 @@ pub struct BrowserManager {
 }
 
 impl BrowserManager {
+    /// Spawn-isolated WebSocket connect: runs eoka's blocking connect on a dedicated
+    /// blocking thread pool (`spawn_blocking`) so leaked connections never starve
+    /// the async runtime — rmcp can always write responses to stdout.
+    async fn spawn_connect(ws_url: &str, config: StealthConfig, timeout_secs: u64) -> anyhow::Result<Browser> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let ws = ws_url.to_string();
+        tokio::task::spawn_blocking(move || {
+            let handle = tokio::runtime::Handle::current();
+            let result = handle.block_on(Browser::connect_with_config(&ws, config));
+            let _ = tx.send(result);
+        });
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await {
+            Ok(Ok(Ok(browser))) => Ok(browser),
+            Ok(Ok(Err(e))) => Err(anyhow::anyhow!("WebSocket connect failed: {}", e)),
+            Ok(Err(_)) => Err(anyhow::anyhow!("WebSocket connect task ended without result (panicked or dropped)")),
+            Err(_) => {
+                tracing::warn!(ws_url, timeout_secs, "WebSocket connect timed out (spawn-isolated)");
+                Err(anyhow::anyhow!("WebSocket connection timed out after {}s — Chrome may be showing authorization popup", timeout_secs))
+            }
+        }
+    }
+
     pub async fn new(args: &crate::cli::Args) -> anyhow::Result<Self> {
         Self::new_with_cache(args, None).await
     }
@@ -133,9 +200,9 @@ impl BrowserManager {
         tracing::info!("Attempting reconnect via cached WS URL...");
 
         let mut config = StealthConfig::live();
-        config.cdp_timeout = 30;
+        config.cdp_timeout = 5;
 
-        match Browser::connect_with_config(ws_url, config).await {
+        match Self::spawn_connect(ws_url, config, 5).await {
             Ok(browser) => {
                 tracing::info!("Reconnected via cached WS URL");
                 Some(Self::from_browser(browser, ConnectionMode::UserChrome, max_tabs, None, Some(ws_url.to_string())))
@@ -151,8 +218,8 @@ impl BrowserManager {
     async fn try_debug_port_connect(port: u16, max_tabs: usize) -> Option<Self> {
         let ws_url = wait_for_debug_port(port, 1).await.ok()?;
         let mut config = StealthConfig::live();
-        config.cdp_timeout = 10;
-        let browser = Browser::connect_with_config(&ws_url, config).await.ok()?;
+        config.cdp_timeout = 5;
+        let browser = Self::spawn_connect(&ws_url, config, 15).await.ok()?;
         tracing::info!(port, "Connected via debug port (fast probe)");
         Some(Self::from_browser(browser, ConnectionMode::UserChrome, max_tabs, None, Some(ws_url)))
     }
@@ -187,9 +254,9 @@ impl BrowserManager {
             tracing::info!(browser = name, port, "Found DevToolsActivePort, attempting auto-connect...");
 
             let mut config = StealthConfig::live();
-            config.cdp_timeout = 30;
+            config.cdp_timeout = 5;
 
-            match Browser::connect_with_config(&ws_url, config).await {
+            match Self::spawn_connect(&ws_url, config, 15).await {
                 Ok(browser) => {
                     tracing::info!("Auto-connected to {} via DevToolsActivePort (port {})", name, port);
                     return Some(Self::from_browser(browser, ConnectionMode::UserChrome, args.max_tabs, None, Some(ws_url)));
@@ -235,8 +302,8 @@ impl BrowserManager {
 
     async fn connect_remote(url: &str, max_tabs: usize) -> anyhow::Result<Self> {
         let mut config = StealthConfig::live();
-        config.cdp_timeout = 60;
-        let browser = Browser::connect_with_config(url, config).await
+        config.cdp_timeout = 10;
+        let browser = Self::spawn_connect(url, config, 10).await
             .map_err(|e| anyhow::anyhow!("Failed to connect to Chrome at {}: {}", url, e))?;
         tracing::info!("Connected to existing Chrome at {}", url);
         Ok(Self::from_browser(browser, ConnectionMode::UserChrome, max_tabs, None, None))
@@ -263,7 +330,7 @@ impl BrowserManager {
             tracing::info!("Detected existing Chrome on port {}, connecting...", port);
             let mut config = StealthConfig::live();
             config.cdp_timeout = 10;
-            match Browser::connect_with_config(&ws_url, config).await {
+            match Self::spawn_connect(&ws_url, config, 10).await {
                 Ok(browser) => {
                     return Ok(Self::from_browser(browser, ConnectionMode::UserChrome, args.max_tabs, None, Some(ws_url)));
                 }
@@ -319,8 +386,8 @@ impl BrowserManager {
         tracing::info!(ws_url = %ws_url, "Chrome ready, connecting via WebSocket...");
 
         let mut config = StealthConfig::live();
-        config.cdp_timeout = 60;
-        let browser = match Browser::connect_with_config(ws_url.trim(), config).await {
+        config.cdp_timeout = 10;
+        let browser = match Self::spawn_connect(ws_url.trim(), config, 10).await {
             Ok(browser) => browser,
             Err(e) => {
                 let _ = child.kill();
@@ -343,7 +410,7 @@ impl BrowserManager {
             patch_binary: true,
             human_mouse: true,
             human_typing: true,
-            cdp_timeout: 60,
+            cdp_timeout: 10,
             ..Default::default()
         };
 

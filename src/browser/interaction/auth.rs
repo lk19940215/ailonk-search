@@ -13,6 +13,34 @@ pub enum AuthPageType {
     NotAuth,
 }
 
+impl AuthPageType {
+    /// Whether this auth type should be handled by the full `click_authorize_with_account`
+    /// pipeline (with preferred_account, account listing, etc.) rather than the
+    /// generic `try_sso_click` loop.
+    ///
+    /// Server-layer code should use this instead of pattern-matching on specific variants.
+    pub fn needs_interactive_handler(&self) -> bool {
+        matches!(
+            self,
+            Self::GoogleOAuthConsent
+                | Self::GoogleAccountSelection
+                | Self::GoogleSamlRedirect
+                | Self::GenericOAuth
+        )
+    }
+
+    /// Whether this auth type requires an SSO click-and-wait loop
+    /// (as opposed to a single-pass handler).
+    pub fn needs_sso_loop(&self) -> bool {
+        matches!(self, Self::CustomSso | Self::GenericLogin)
+    }
+
+    /// Whether this auth page type exposes a selectable account list.
+    pub fn has_account_list(&self) -> bool {
+        matches!(self, Self::GoogleAccountSelection)
+    }
+}
+
 impl std::fmt::Display for AuthPageType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -77,33 +105,39 @@ pub async fn detect_auth_page_with_target(page: &Page, target_url: Option<&str>)
         return AuthPageType::CustomSso;
     }
 
-    if let Ok(text) = page.text().await {
-        let text_lower = text.to_lowercase();
-        let has_sso_content = SSO_CONTENT_SIGNALS.iter().any(|s| text_lower.contains(s));
-        if has_sso_content {
-            if has_sso_url || has_redirect {
-                return AuthPageType::CustomSso;
-            }
-            let has_google_widget = text_lower.contains("accounts.google.com")
-                || text_lower.contains("googleapis.com/")
-                || text_lower.contains("g_id_onload")
-                || text_lower.contains("google-signin");
-            if has_google_widget {
-                return AuthPageType::CustomSso;
-            }
-        }
-    }
-
-    // Generic login detection: only if we were redirected away from target URL
-    let was_redirected = match target_url {
+    // If we're already at the target URL, skip content-based heuristics.
+    // Pages at the target may contain Google widgets, "sign in" text, etc.
+    // that would cause false positives.
+    let at_target = match target_url {
         Some(target) => {
             let current = url.trim_end_matches('/');
             let target_norm = target.to_lowercase();
             let target_norm = target_norm.trim_end_matches('/');
-            current != target_norm
+            current == target_norm
         }
         None => false,
     };
+
+    if !at_target {
+        if let Ok(text) = page.text().await {
+            let text_lower = text.to_lowercase();
+            let has_sso_content = SSO_CONTENT_SIGNALS.iter().any(|s| text_lower.contains(s));
+            if has_sso_content {
+                if has_sso_url || has_redirect {
+                    return AuthPageType::CustomSso;
+                }
+                let has_google_widget = text_lower.contains("accounts.google.com")
+                    || text_lower.contains("googleapis.com/")
+                    || text_lower.contains("g_id_onload")
+                    || text_lower.contains("google-signin");
+                if has_google_widget {
+                    return AuthPageType::CustomSso;
+                }
+            }
+        }
+    }
+
+    let was_redirected = !at_target;
     if was_redirected {
         if detect_auth_button(page).await.is_some() {
             return AuthPageType::GenericLogin;
@@ -115,11 +149,14 @@ pub async fn detect_auth_page_with_target(page: &Page, target_url: Option<&str>)
 
 /// Execute the appropriate click strategy for the detected auth page type.
 /// Supports multi-step flows (e.g., account selection → consent) with a depth limit.
-pub fn click_authorize<'a>(
+/// `preferred_account` can be a full email ("user@company.com") or domain ("@company.com").
+/// Falls back to `PREFERRED_ACCOUNT` env var, then first available account.
+pub fn click_authorize_with_account<'a>(
     page: &'a Page,
     auth_type: &'a AuthPageType,
+    preferred_account: Option<&'a str>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AuthResult> + Send + 'a>> {
-    Box::pin(click_authorize_inner(page, auth_type, 0))
+    Box::pin(click_authorize_inner(page, auth_type, 0, preferred_account))
 }
 
 const AUTH_BUTTON_SCORE_JS: &str = r#"
@@ -129,11 +166,14 @@ const AUTH_BUTTON_SCORE_JS: &str = r#"
         let bestEl = null;
         let bestText = null;
         let bestScore = 0;
+        const NON_AUTH_HREF_PATTERNS = ['docs.google.com', 'drive.google.com', 'sheets.google.com', 'slides.google.com', 'calendar.google.com', 'mail.google.com'];
         for (const el of elements) {
             const text = (el.textContent || el.value || '').trim().toLowerCase();
             if (text.length === 0 || text.length > 100) continue;
             const rect = el.getBoundingClientRect();
             if (rect.width < 10 || rect.height < 10) continue;
+            const href = (el.href || el.getAttribute('href') || '').toLowerCase();
+            if (href && NON_AUTH_HREF_PATTERNS.some(p => href.includes(p))) continue;
             let score = 0;
             for (const kw of keywords) {
                 if (text.includes(kw)) {
@@ -207,11 +247,12 @@ fn click_authorize_inner<'a>(
     page: &'a Page,
     auth_type: &'a AuthPageType,
     depth: u8,
+    preferred_account: Option<&'a str>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AuthResult> + Send + 'a>> {
-    Box::pin(click_authorize_impl(page, auth_type, depth))
+    Box::pin(click_authorize_impl(page, auth_type, depth, preferred_account))
 }
 
-async fn click_authorize_impl(page: &Page, auth_type: &AuthPageType, depth: u8) -> AuthResult {
+async fn click_authorize_impl(page: &Page, auth_type: &AuthPageType, depth: u8, preferred_account: Option<&str>) -> AuthResult {
     if depth >= MAX_AUTH_DEPTH {
         return AuthResult {
             success: false,
@@ -225,22 +266,22 @@ async fn click_authorize_impl(page: &Page, auth_type: &AuthPageType, depth: u8) 
 
     match auth_type {
         AuthPageType::GoogleOAuthConsent => {
-            handle_google_oauth_consent(page, &initial_url, depth).await
+            handle_google_oauth_consent(page, &initial_url, depth, preferred_account).await
         }
         AuthPageType::GoogleAccountSelection => {
-            handle_google_account_selection(page, &initial_url, depth).await
+            handle_google_account_selection(page, &initial_url, depth, preferred_account).await
         }
         AuthPageType::GoogleSamlRedirect => {
-            handle_google_saml(page, &initial_url, depth).await
+            handle_google_saml(page, &initial_url, depth, preferred_account).await
         }
         AuthPageType::GenericOAuth => {
-            handle_generic_oauth(page, &initial_url, depth).await
+            handle_generic_oauth(page, &initial_url, depth, preferred_account).await
         }
         AuthPageType::CustomSso => {
-            handle_custom_sso(page, &initial_url, depth).await
+            handle_custom_sso(page, &initial_url, depth, preferred_account).await
         }
         AuthPageType::GenericLogin => {
-            handle_generic_login(page, &initial_url, depth).await
+            handle_generic_login(page, &initial_url, depth, preferred_account).await
         }
         AuthPageType::NotAuth => AuthResult {
             success: false,
@@ -251,7 +292,7 @@ async fn click_authorize_impl(page: &Page, auth_type: &AuthPageType, depth: u8) 
     }
 }
 
-async fn handle_google_oauth_consent(page: &Page, initial_url: &str, depth: u8) -> AuthResult {
+async fn handle_google_oauth_consent(page: &Page, initial_url: &str, depth: u8, preferred_account: Option<&str>) -> AuthResult {
     tracing::info!("Handling Google OAuth consent page");
 
     page.wait(1500).await;
@@ -275,65 +316,60 @@ async fn handle_google_oauth_consent(page: &Page, initial_url: &str, depth: u8) 
         };
     }
 
-    wait_for_auth_completion(page, initial_url, AuthPageType::GoogleOAuthConsent, depth).await
+    wait_for_auth_completion(page, initial_url, AuthPageType::GoogleOAuthConsent, depth, preferred_account).await
 }
 
-async fn handle_google_account_selection(page: &Page, initial_url: &str, depth: u8) -> AuthResult {
-    tracing::info!("Handling Google account selection page");
+async fn handle_google_account_selection(page: &Page, initial_url: &str, depth: u8, preferred_account: Option<&str>) -> AuthResult {
+    tracing::info!(preferred = ?preferred_account, "Handling Google account selection page");
 
     page.wait(1500).await;
 
-    let account_js = r#"
-        (() => {
-            const items = document.querySelectorAll('[data-identifier], [data-email], .JDAKTe');
-            if (items.length === 0) return { count: 0 };
-            return { count: items.length, email: items[0].getAttribute('data-identifier') || items[0].getAttribute('data-email') || '' };
-        })()
-    "#;
+    let accounts = list_google_accounts(page).await;
+    if accounts.is_empty() {
+        return AuthResult {
+            success: false,
+            auth_type: AuthPageType::GoogleAccountSelection,
+            final_url: page.url().await.unwrap_or_default(),
+            message: "No accounts found on the selection page.".to_string(),
+        };
+    }
 
-    #[derive(serde::Deserialize)]
-    struct AccountInfo { count: usize, #[serde(default)] email: String }
+    tracing::info!(
+        count = accounts.len(),
+        accounts = ?accounts.iter().map(|a| a.email.as_str()).collect::<Vec<_>>(),
+        "Found Google accounts"
+    );
 
-    if let Ok(info) = super::input::extract::<AccountInfo>(page, account_js).await {
-        if info.count == 0 {
-            return AuthResult {
-                success: false,
-                auth_type: AuthPageType::GoogleAccountSelection,
-                final_url: page.url().await.unwrap_or_default(),
-                message: "No accounts found on the selection page.".to_string(),
-            };
-        }
+    let target_idx = select_preferred_account(&accounts, preferred_account);
+    let target_email = &accounts[target_idx].email;
+    tracing::info!(selected = %target_email, index = target_idx, "Selecting account");
 
-        tracing::info!(accounts = info.count, first = %info.email, "Found accounts, clicking first");
+    let dom_index = accounts[target_idx].index;
+    let clicked = click_account_by_email(page, target_email).await
+        || click_account_by_index(page, dom_index).await;
 
-        let clicked = try_click_sequence(page, &[
-            ClickAction::Selector("[data-identifier]"),
-            ClickAction::Selector("[data-email]"),
-            ClickAction::Selector(".JDAKTe"),
-        ]).await;
+    if clicked {
+        tracing::info!(email = %target_email, "Clicked account");
+        page.wait(2000).await;
+        let _ = page.wait_for_network_idle(500, 8000).await;
 
-        if clicked {
-            page.wait(2000).await;
-            let _ = page.wait_for_network_idle(500, 8000).await;
+        let new_url = page.url().await.unwrap_or_default();
+        let new_auth_type = detect_auth_page(page).await;
 
-            let new_url = page.url().await.unwrap_or_default();
-            let new_auth_type = detect_auth_page(page).await;
-
-            match new_auth_type {
-                AuthPageType::GoogleOAuthConsent => {
-                    return click_authorize_inner(page, &AuthPageType::GoogleOAuthConsent, depth + 1).await;
-                }
-                AuthPageType::NotAuth => {
-                    return AuthResult {
-                        success: true,
-                        auth_type: AuthPageType::GoogleAccountSelection,
-                        final_url: new_url,
-                        message: "Account selected and authorization completed.".to_string(),
-                    };
-                }
-                _ => {
-                    return wait_for_auth_completion(page, initial_url, AuthPageType::GoogleAccountSelection, depth).await;
-                }
+        match new_auth_type {
+            AuthPageType::GoogleOAuthConsent => {
+                return click_authorize_inner(page, &AuthPageType::GoogleOAuthConsent, depth + 1, preferred_account).await;
+            }
+            AuthPageType::NotAuth => {
+                return AuthResult {
+                    success: true,
+                    auth_type: AuthPageType::GoogleAccountSelection,
+                    final_url: new_url,
+                    message: format!("Account '{}' selected, authorization completed.", target_email),
+                };
+            }
+            _ => {
+                return wait_for_auth_completion(page, initial_url, AuthPageType::GoogleAccountSelection, depth, preferred_account).await;
             }
         }
     }
@@ -342,11 +378,126 @@ async fn handle_google_account_selection(page: &Page, initial_url: &str, depth: 
         success: false,
         auth_type: AuthPageType::GoogleAccountSelection,
         final_url: page.url().await.unwrap_or_default(),
-        message: "Could not select an account. Manual selection may be required.".to_string(),
+        message: format!(
+            "Could not click account. Available: [{}]",
+            accounts.iter().map(|a| a.email.as_str()).collect::<Vec<_>>().join(", ")
+        ),
     }
 }
 
-async fn handle_google_saml(page: &Page, initial_url: &str, depth: u8) -> AuthResult {
+/// Account info extracted from a Google account chooser page.
+#[derive(Debug, Clone)]
+pub struct GoogleAccount {
+    pub email: String,
+    pub index: usize,
+}
+
+/// List all Google accounts visible on an account chooser page.
+pub async fn list_google_accounts(page: &Page) -> Vec<GoogleAccount> {
+    let js = r#"
+        (() => {
+            const items = document.querySelectorAll('[data-identifier], [data-email], .JDAKTe');
+            const accounts = [];
+            for (let i = 0; i < items.length; i++) {
+                const email = items[i].getAttribute('data-identifier')
+                    || items[i].getAttribute('data-email')
+                    || '';
+                if (email) accounts.push({ email, index: i });
+            }
+            return accounts;
+        })()
+    "#;
+
+    #[derive(serde::Deserialize)]
+    struct RawAccount {
+        email: String,
+        index: usize,
+    }
+
+    match super::input::extract::<Vec<RawAccount>>(page, js).await {
+        Ok(raw) => raw.into_iter().map(|r| GoogleAccount { email: r.email, index: r.index }).collect(),
+        Err(_) => vec![],
+    }
+}
+
+/// Determine which account to select based on preference.
+///
+/// Matching rules (in priority order):
+/// 1. Exact email match (case-insensitive)
+/// 2. Domain suffix match (e.g. "@company.com" matches "user@company.com")
+/// 3. Fallback to first account (index 0)
+fn select_preferred_account(accounts: &[GoogleAccount], preferred: Option<&str>) -> usize {
+    let source;
+    let pref = match preferred {
+        Some(p) if !p.is_empty() => { source = "param"; p.to_lowercase() }
+        _ => match std::env::var("PREFERRED_ACCOUNT").ok() {
+            Some(env_val) if !env_val.is_empty() => { source = "env(PREFERRED_ACCOUNT)"; env_val.to_lowercase() }
+            _ => {
+                tracing::debug!(selected = %accounts[0].email, "No preference set, defaulting to first account");
+                return 0;
+            }
+        }
+    };
+
+    tracing::info!(preference = %pref, source, "Resolving account preference");
+
+    if let Some(idx) = find_matching_account(accounts, &pref) {
+        tracing::info!(
+            matched = %accounts[idx].email, index = idx,
+            match_type = if pref.starts_with('@') { "domain_suffix" } else { "exact_email" },
+            "Account preference matched"
+        );
+        return idx;
+    }
+
+    tracing::warn!(preferred = %pref, source, "No matching account found, falling back to first");
+    0
+}
+
+fn find_matching_account(accounts: &[GoogleAccount], pattern: &str) -> Option<usize> {
+    let pattern = pattern.to_lowercase();
+
+    // Exact email match
+    for (i, acct) in accounts.iter().enumerate() {
+        if acct.email.to_lowercase() == pattern {
+            return Some(i);
+        }
+    }
+
+    // Domain suffix match (e.g. "@company.com")
+    if pattern.starts_with('@') {
+        for (i, acct) in accounts.iter().enumerate() {
+            if acct.email.to_lowercase().ends_with(&pattern) {
+                return Some(i);
+            }
+        }
+    }
+
+    None
+}
+
+async fn click_account_by_email(page: &Page, email: &str) -> bool {
+    let selector = format!("[data-identifier='{}']", email);
+    if page.try_click(&selector).await.unwrap_or(false) {
+        return true;
+    }
+    let selector = format!("[data-email='{}']", email);
+    page.try_click(&selector).await.unwrap_or(false)
+}
+
+async fn click_account_by_index(page: &Page, index: usize) -> bool {
+    let js = format!(
+        r#"(() => {{
+            const items = document.querySelectorAll('[data-identifier], [data-email], .JDAKTe');
+            if (items.length > {idx}) {{ items[{idx}].click(); return true; }}
+            return false;
+        }})()"#,
+        idx = index
+    );
+    page.evaluate::<bool>(&js).await.unwrap_or(false)
+}
+
+async fn handle_google_saml(page: &Page, initial_url: &str, depth: u8, preferred_account: Option<&str>) -> AuthResult {
     tracing::info!("Handling Google SAML redirect — waiting for redirect to complete");
 
     let _ = page.wait_for_network_idle(500, 10000).await;
@@ -361,18 +512,18 @@ async fn handle_google_saml(page: &Page, initial_url: &str, depth: u8) -> AuthRe
             message: "SAML redirect completed.".to_string(),
         },
         AuthPageType::GoogleOAuthConsent => {
-            click_authorize_inner(page, &AuthPageType::GoogleOAuthConsent, depth + 1).await
+            click_authorize_inner(page, &AuthPageType::GoogleOAuthConsent, depth + 1, preferred_account).await
         }
         AuthPageType::GoogleAccountSelection => {
-            click_authorize_inner(page, &AuthPageType::GoogleAccountSelection, depth + 1).await
+            click_authorize_inner(page, &AuthPageType::GoogleAccountSelection, depth + 1, preferred_account).await
         }
         _ => {
-            wait_for_auth_completion(page, initial_url, AuthPageType::GoogleSamlRedirect, depth).await
+            wait_for_auth_completion(page, initial_url, AuthPageType::GoogleSamlRedirect, depth, preferred_account).await
         }
     }
 }
 
-async fn handle_generic_oauth(page: &Page, initial_url: &str, depth: u8) -> AuthResult {
+async fn handle_generic_oauth(page: &Page, initial_url: &str, depth: u8, preferred_account: Option<&str>) -> AuthResult {
     tracing::info!("Handling generic OAuth consent page");
 
     page.wait(1500).await;
@@ -395,10 +546,10 @@ async fn handle_generic_oauth(page: &Page, initial_url: &str, depth: u8) -> Auth
         };
     }
 
-    wait_for_auth_completion(page, initial_url, AuthPageType::GenericOAuth, depth).await
+    wait_for_auth_completion(page, initial_url, AuthPageType::GenericOAuth, depth, preferred_account).await
 }
 
-async fn handle_custom_sso(page: &Page, initial_url: &str, depth: u8) -> AuthResult {
+async fn handle_custom_sso(page: &Page, initial_url: &str, depth: u8, preferred_account: Option<&str>) -> AuthResult {
     tracing::info!(url = %initial_url, "Handling custom SSO page with embedded Google Sign-In");
 
     let target_url = extract_sso_target(initial_url);
@@ -491,17 +642,17 @@ async fn handle_custom_sso(page: &Page, initial_url: &str, depth: u8) -> AuthRes
         }
     }
 
-    finish_sso_auth(page, &post_click_url, depth).await
+    finish_sso_auth(page, &post_click_url, depth, preferred_account).await
 }
 
 /// Try to click sign-in buttons on a custom SSO page.
 /// Returns true if something was clicked. Exported for server-level popup coordination.
 pub async fn try_sso_click(page: &Page) -> bool {
     // 1. Try specific selectors (fast, precise)
+    // Only match elements clearly intended for auth — no generic "google" class matching.
     let clicked = try_click_sequence(page, &[
         ClickAction::Selector("a[href*='accounts.google.com']"),
         ClickAction::Selector("button[class*='google']"),
-        ClickAction::Selector("a[class*='google']"),
         ClickAction::Selector("[id*='google-signin']"),
         ClickAction::Selector("[class*='g_id_signin']"),
         ClickAction::TextContains("sign in as"),
@@ -526,7 +677,7 @@ pub async fn try_sso_click(page: &Page) -> bool {
     ]).await
 }
 
-async fn handle_generic_login(page: &Page, initial_url: &str, depth: u8) -> AuthResult {
+async fn handle_generic_login(page: &Page, initial_url: &str, depth: u8, preferred_account: Option<&str>) -> AuthResult {
     tracing::info!(url = %initial_url, "Handling generic login page");
 
     page.wait(1000).await;
@@ -561,7 +712,7 @@ async fn handle_generic_login(page: &Page, initial_url: &str, depth: u8) -> Auth
                 final_url: post_click_url,
                 message: "Login completed, redirected to target page.".to_string(),
             },
-            _ => click_authorize_inner(page, &new_auth_type, depth + 1).await,
+            _ => click_authorize_inner(page, &new_auth_type, depth + 1, preferred_account).await,
         }
     } else {
         AuthResult {
@@ -684,7 +835,7 @@ async fn try_google_signin_iframe(page: &Page) -> bool {
     false
 }
 
-async fn finish_sso_auth(page: &Page, initial_url: &str, depth: u8) -> AuthResult {
+async fn finish_sso_auth(page: &Page, initial_url: &str, depth: u8, preferred_account: Option<&str>) -> AuthResult {
     let new_url = page.url().await.unwrap_or_default();
     let new_auth_type = detect_auth_page(page).await;
 
@@ -705,7 +856,6 @@ async fn finish_sso_auth(page: &Page, initial_url: &str, depth: u8) -> AuthResul
                 },
             }
         }
-        // Avoid recursing back to the same CustomSso page (loop guard)
         AuthPageType::CustomSso if new_url == initial_url => {
             AuthResult {
                 success: false,
@@ -717,10 +867,10 @@ async fn finish_sso_auth(page: &Page, initial_url: &str, depth: u8) -> AuthResul
         AuthPageType::GoogleOAuthConsent
         | AuthPageType::GoogleAccountSelection
         | AuthPageType::GoogleSamlRedirect => {
-            click_authorize_inner(page, &new_auth_type, depth + 1).await
+            click_authorize_inner(page, &new_auth_type, depth + 1, preferred_account).await
         }
         other => {
-            click_authorize_inner(page, &other, depth + 1).await
+            click_authorize_inner(page, &other, depth + 1, preferred_account).await
         }
     }
 }
@@ -738,20 +888,7 @@ async fn try_click_sequence(page: &Page, actions: &[ClickAction<'_>]) -> bool {
             ClickAction::Selector(sel) => page.try_click(sel).await.unwrap_or(false),
             ClickAction::Text(text) => page.try_click_by_text(text).await.unwrap_or(false),
             ClickAction::TextContains(text) => {
-                let js = format!(
-                    r#"(() => {{
-                        const needle = {}.toLowerCase();
-                        for (const el of document.querySelectorAll('a, button, [role="button"], span[onclick], div[onclick]')) {{
-                            if (el.textContent.toLowerCase().includes(needle)) {{
-                                el.click();
-                                return true;
-                            }}
-                        }}
-                        return false;
-                    }})()"#,
-                    serde_json::json!(text)
-                );
-                page.evaluate::<bool>(&js).await.unwrap_or(false)
+                super::click::click_by_text_contains(page, text).await
             }
         };
         if clicked {
@@ -762,7 +899,7 @@ async fn try_click_sequence(page: &Page, actions: &[ClickAction<'_>]) -> bool {
     false
 }
 
-async fn wait_for_auth_completion(page: &Page, initial_url: &str, auth_type: AuthPageType, depth: u8) -> AuthResult {
+async fn wait_for_auth_completion(page: &Page, initial_url: &str, auth_type: AuthPageType, depth: u8, preferred_account: Option<&str>) -> AuthResult {
     page.wait(2000).await;
     let _ = page.wait_for_network_idle(500, 10000).await;
 
@@ -781,13 +918,13 @@ async fn wait_for_auth_completion(page: &Page, initial_url: &str, auth_type: Aut
                 }
             }
             AuthPageType::GoogleOAuthConsent => {
-                click_authorize_inner(page, &AuthPageType::GoogleOAuthConsent, depth + 1).await
+                click_authorize_inner(page, &AuthPageType::GoogleOAuthConsent, depth + 1, preferred_account).await
             }
             AuthPageType::GoogleAccountSelection => {
-                click_authorize_inner(page, &AuthPageType::GoogleAccountSelection, depth + 1).await
+                click_authorize_inner(page, &AuthPageType::GoogleAccountSelection, depth + 1, preferred_account).await
             }
             other @ (AuthPageType::GenericOAuth | AuthPageType::GoogleSamlRedirect | AuthPageType::CustomSso | AuthPageType::GenericLogin) => {
-                click_authorize_inner(page, &other, depth + 1).await
+                click_authorize_inner(page, &other, depth + 1, preferred_account).await
             }
         }
     } else {

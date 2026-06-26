@@ -1,5 +1,6 @@
 pub mod tools;
 mod authorize;
+mod popup_handler;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,8 +47,11 @@ impl SearchServer {
         }
     }
 
-    async fn browser(&self) -> Result<Arc<BrowserManager>, ErrorData> {
-        self.browser.get().await.map_err(to_mcp_error)
+    /// Get a browser connection. Returns cached healthy connection or triggers reconnect.
+    /// No extra spawn/timeout — relies on `with_hard_timeout` at the tool level and
+    /// `spawn_connect` at the individual eoka connection level.
+    async fn get_browser(&self) -> Result<Arc<BrowserManager>, ErrorData> {
+        self.browser.get().await.map_err(|e| to_mcp_error(e.to_string()))
     }
 
     /// Kill the debug Chrome process on port 19222 so cookie files can be safely overwritten.
@@ -78,6 +82,50 @@ pub(crate) fn is_fatal_cdp_error_anyhow(err: &anyhow::Error) -> bool {
     is_fatal_cdp_error(&err.to_string())
 }
 
+/// Hard ceiling for fetch_and_extract: prevents CDP hangs from holding tabs forever.
+const FETCH_HARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Tab acquisition timeout — catches the case where Chrome cannot create/reuse tabs
+/// (e.g. popup is blocking page operations or Chrome is partially unresponsive).
+const TAB_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Spawn-isolated hard timeout: runs `work` on a separate tokio task and enforces
+/// the timeout via a `oneshot` channel. This guarantees the timeout fires even if
+/// the work blocks a tokio worker thread (e.g. blocking CDP I/O), because the
+/// `tokio::time::timeout` waits on a pure in-memory channel, not on the work itself.
+async fn with_hard_timeout<F>(
+    timeout: std::time::Duration,
+    name: &'static str,
+    work: F,
+) -> Result<CallToolResult, ErrorData>
+where
+    F: std::future::Future<Output = Result<CallToolResult, ErrorData>> + Send + 'static,
+{
+    let start = std::time::Instant::now();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _ = tx.send(work.await);
+    });
+    let result = match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(to_mcp_error(format!("{}: internal task cancelled", name))),
+        Err(_) => {
+            tracing::error!("{} hard timeout ({}s) — CDP may be blocked", name, timeout.as_secs());
+            Err(to_mcp_error(format!(
+                "{}: hard timeout after {}s. Browser may be unresponsive — please restart MCP server.",
+                name, timeout.as_secs()
+            )))
+        }
+    };
+    let elapsed = start.elapsed();
+    if result.is_err() {
+        tracing::warn!("{}: returning error after {:.1}s", name, elapsed.as_secs_f64());
+    } else {
+        tracing::debug!("{}: completed in {:.1}s", name, elapsed.as_secs_f64());
+    }
+    result
+}
+
 /// Shared read logic: acquire tab → navigate → CAPTCHA → extract content.
 /// Used by batch_read and search_and_read to eliminate code duplication.
 async fn fetch_and_extract(
@@ -86,8 +134,10 @@ async fn fetch_and_extract(
     max_len: usize,
     cache: &ContentCache,
 ) -> anyhow::Result<crate::extract::content::ExtractedContent> {
-    let tab = bm.tab_pool().acquire().await?;
-    let page_result = async {
+    let tab = tokio::time::timeout(TAB_ACQUIRE_TIMEOUT, bm.tab_pool().acquire())
+        .await
+        .map_err(|_| anyhow::anyhow!("Tab acquire timed out ({}s) — Chrome may be unresponsive", TAB_ACQUIRE_TIMEOUT.as_secs()))??;
+    let page_result = tokio::time::timeout(FETCH_HARD_TIMEOUT, async {
         interaction::navigate(tab.page(), url, 15).await?;
         interaction::handle_consent(tab.page(), "").await.ok();
         if interaction::is_captcha_present(tab.page()).await {
@@ -101,8 +151,18 @@ async fn fetch_and_extract(
         }
         tab.page().content().await
             .map_err(|e| anyhow::anyhow!("Content fetch failed: {}", e))
-    }.await;
+    }).await;
     tab.close().await;
+
+    let page_result = match page_result {
+        Ok(inner) => inner,
+        Err(_) => {
+            tracing::error!(url = %url, "fetch_and_extract hard timeout — CDP may be unresponsive");
+            bm.mark_unhealthy();
+            anyhow::bail!("Page fetch timed out. Browser connection may be lost.")
+        }
+    };
+
     if let Err(ref e) = page_result {
         if is_fatal_cdp_error_anyhow(e) {
             bm.mark_unhealthy();
@@ -152,45 +212,51 @@ impl SearchServer {
         if query.is_empty() || query.chars().count() > 500 {
             return Err(to_mcp_error("Query must be 1-500 characters"));
         }
-        let count = params.count.clamp(1, 20);
-        let bm = self.browser().await?;
-        let rl = self.rate_limiter(&bm).await;
-        rl.wait().await;
+        let this = self.clone();
+        with_hard_timeout(std::time::Duration::from_secs(30), "web_search", async move {
+            let count = params.count.clamp(1, 20);
+            let bm = this.get_browser().await?;
+            let rl = this.rate_limiter(&bm).await;
+            rl.wait().await;
 
-        let engine = select_engine(
-            &params.engine,
-            bm.mode(),
-            &self.default_engine,
-            self.region,
-        );
-
-        let tab = bm.tab_pool().acquire().await.map_err(to_mcp_error)?;
-
-        let result = async {
-            search_with_fallback(
-                engine,
+            let engine = select_engine(
+                &params.engine,
                 bm.mode(),
-                tab.page(),
-                &query,
-                count,
-                self.region,
-            )
-            .await
-            .map_err(to_mcp_error)
-        }
-        .await;
+                &this.default_engine,
+                this.region,
+            );
 
-        tab.close().await;
-        self.check_cdp_error(&result, &bm);
+            let tab = tokio::time::timeout(TAB_ACQUIRE_TIMEOUT, bm.tab_pool().acquire())
+                .await
+                .map_err(|_| to_mcp_error(format!("Tab acquire timed out ({}s)", TAB_ACQUIRE_TIMEOUT.as_secs())))?
+                .map_err(to_mcp_error)?;
 
-        match &result {
-            Ok(_) => rl.reset_penalty().await,
-            Err(_) => rl.backoff().await,
-        }
+            let result = async {
+                search_with_fallback(
+                    engine,
+                    bm.mode(),
+                    tab.page(),
+                    &query,
+                    count,
+                    this.region,
+                )
+                .await
+                .map_err(to_mcp_error)
+            }
+            .await;
 
-        let (engine_name, results) = result?;
-        let text = format_search_results(&query, &engine_name, &results);
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+            tab.close().await;
+            this.check_cdp_error(&result, &bm);
+
+            match &result {
+                Ok(_) => rl.reset_penalty().await,
+                Err(_) => rl.backoff().await,
+            }
+
+            let (engine_name, results) = result?;
+            let text = format_search_results(&query, &engine_name, &results);
+            Ok(CallToolResult::success(vec![Content::text(text)]))
+        }).await
     }
 
     #[tool(description = "Fetch a single URL using Chrome and extract the main content as clean Markdown. Handles JavaScript-rendered pages and cookie consent. Use this when you have a specific URL and need its content.")]
@@ -210,80 +276,88 @@ impl SearchServer {
             return Ok(CallToolResult::success(vec![Content::text(text)]));
         }
 
-        let bm = self.browser().await?;
-        let tab = bm.tab_pool().acquire().await.map_err(to_mcp_error)?;
+        let this = self.clone();
+        with_hard_timeout(std::time::Duration::from_secs(30), "read_page", async move {
+            let bm = this.get_browser().await?;
+            let tab = tokio::time::timeout(TAB_ACQUIRE_TIMEOUT, bm.tab_pool().acquire())
+                .await
+                .map_err(|_| to_mcp_error(format!("Tab acquire timed out ({}s)", TAB_ACQUIRE_TIMEOUT.as_secs())))?
+                .map_err(to_mcp_error)?;
 
-        let nav_result = interaction::navigate(tab.page(), &params.url, 15).await
-            .map_err(to_mcp_error);
-        if let Err(ref e) = nav_result {
-            if is_fatal_cdp_error(&e.message) {
-                bm.mark_unhealthy();
-            }
+            let page_work = async {
+                interaction::navigate(tab.page(), &params.url, 15).await
+                    .map_err(to_mcp_error)?;
+
+                interaction::handle_consent(tab.page(), "").await.ok();
+
+                if interaction::is_captcha_present(tab.page()).await {
+                    tracing::warn!(url = %params.url, "CAPTCHA detected, attempting resolve...");
+                    match interaction::resolve_captcha_loop(tab.page(), 1).await {
+                        Ok(_) => {
+                            tracing::info!("CAPTCHA resolved");
+                            let _ = tab.page().wait_for_network_idle(500, 3000).await;
+                        }
+                        Err(_) => {
+                            tracing::warn!("CAPTCHA could not be resolved");
+                            return Ok::<_, ErrorData>("".to_string());
+                        }
+                    }
+                }
+
+                tab.page().content().await
+                    .map_err(|e| to_mcp_error(format!("Failed to get page content: {}", e)))
+            };
+
+            let timed_result = tokio::time::timeout(FETCH_HARD_TIMEOUT, page_work).await;
             tab.close().await;
-            return Err(nav_result.unwrap_err());
-        }
 
-        interaction::handle_consent(tab.page(), "").await.ok();
-
-        if interaction::is_captcha_present(tab.page()).await {
-            tracing::warn!(url = %params.url, "CAPTCHA detected, attempting resolve...");
-            match interaction::resolve_captcha_loop(tab.page(), 1).await {
-                Ok(_) => {
-                    tracing::info!("CAPTCHA resolved");
-                    let _ = tab.page().wait_for_network_idle(500, 3000).await;
+            let html = match timed_result {
+                Ok(inner) => {
+                    this.check_cdp_error(&inner, &bm);
+                    inner?
                 }
                 Err(_) => {
-                    tracing::warn!("CAPTCHA could not be resolved");
-                    tab.close().await;
-                    let text = format!(
-                        "# CAPTCHA\n\nSource: {} [READ_FAILED]\n\n---\n\n> Reason: CAPTCHA unresolved",
-                        params.url
-                    );
-                    return Ok(CallToolResult::success(vec![Content::text(text)]));
+                    tracing::error!(url = %params.url, "read_page hard timeout — CDP may be unresponsive");
+                    bm.mark_unhealthy();
+                    return Err(to_mcp_error("Page read timed out. Browser connection may be lost — it will auto-reconnect on next call."));
                 }
+            };
+
+            if html.is_empty() {
+                return Err(to_mcp_error(format!(
+                    "Failed to load content from {} — page returned empty HTML", params.url
+                )));
             }
-        }
 
-        let result = tab.page().content().await
-            .map_err(|e| to_mcp_error(format!("Failed to get page content: {}", e)));
-        tab.close().await;
-        self.check_cdp_error(&result, &bm);
-        let html = result?;
+            let extracted = crate::extract::content::ContentExtractor::extract(
+                &html, &params.url, max_length,
+            ).map_err(to_mcp_error)?;
 
-        if html.is_empty() {
-            return Err(to_mcp_error(format!(
-                "Failed to load content from {} — page returned empty HTML", params.url
-            )));
-        }
+            if extracted.is_low_quality() {
+                let reason = extracted.low_quality_reason().unwrap_or("unknown");
+                let text = format!(
+                    "# {}\n\nSource: {} [READ_FAILED]\n\n---\n\n{}\n\n> Reason: {} (quality: {:.2})",
+                    extracted.title, params.url, extracted.content, reason, extracted.quality
+                );
+                return Ok(CallToolResult::success(vec![Content::text(text)]));
+            }
 
-        let extracted = crate::extract::content::ContentExtractor::extract(
-            &html, &params.url, max_length,
-        ).map_err(to_mcp_error)?;
+            let mut content = extracted.content;
+            if !params.include_links {
+                content = crate::extract::content::strip_markdown_links(&content);
+            }
 
-        if extracted.is_low_quality() {
-            let reason = extracted.low_quality_reason().unwrap_or("unknown");
+            this.cache.insert(
+                cache_key,
+                CachedContent { title: extracted.title.clone(), content: content.clone() },
+            ).await;
+
             let text = format!(
-                "# {}\n\nSource: {} [READ_FAILED]\n\n---\n\n{}\n\n> Reason: {} (quality: {:.2})",
-                extracted.title, params.url, extracted.content, reason, extracted.quality
+                "# {}\n\nSource: {}\n\n---\n\n{}",
+                extracted.title, params.url, content
             );
-            return Ok(CallToolResult::success(vec![Content::text(text)]));
-        }
-
-        let mut content = extracted.content;
-        if !params.include_links {
-            content = crate::extract::content::strip_markdown_links(&content);
-        }
-
-        self.cache.insert(
-            cache_key,
-            CachedContent { title: extracted.title.clone(), content: content.clone() },
-        ).await;
-
-        let text = format!(
-            "# {}\n\nSource: {}\n\n---\n\n{}",
-            extracted.title, params.url, content
-        );
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+            Ok(CallToolResult::success(vec![Content::text(text)]))
+        }).await
     }
 
     #[tool(description = "Read multiple URLs concurrently using Chrome and extract their content as clean Markdown. Supports up to 10 URLs per call with configurable concurrency. Returns a summary of successful reads and any errors.")]
@@ -299,85 +373,88 @@ impl SearchServer {
             return Ok(CallToolResult::success(vec![Content::text("No URLs provided.")]));
         }
 
-        let max_length_per_page = params.max_length_per_page.clamp(1, 15000);
-        let bm = self.browser().await?.clone();
-        let effective_concurrency = params.concurrency
-            .clamp(1, 10)
-            .min(bm.tab_pool().max_tabs())
-            .min(urls.len());
+        let this = self.clone();
+        with_hard_timeout(std::time::Duration::from_secs(75), "batch_read", async move {
+            let max_length_per_page = params.max_length_per_page.clamp(1, 15000);
+            let bm = this.get_browser().await?.clone();
+            let effective_concurrency = params.concurrency
+                .clamp(1, 10)
+                .min(bm.tab_pool().max_tabs())
+                .min(urls.len());
 
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_concurrency));
-        let mut handles = vec![];
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_concurrency));
+            let mut handles = vec![];
 
-        for url in urls.iter() {
-            let sem = semaphore.clone();
-            let url = url.clone();
-            let bm = bm.clone();
-            let cache = self.cache.clone();
-            let max_len = max_length_per_page;
+            for url in urls.iter() {
+                let sem = semaphore.clone();
+                let url = url.clone();
+                let bm = bm.clone();
+                let cache = this.cache.clone();
+                let max_len = max_length_per_page;
 
-            handles.push(tokio::spawn(async move {
-                let _permit = match sem.acquire().await {
-                    Ok(p) => p,
-                    Err(e) => return (url, Err(anyhow::anyhow!("Semaphore error: {e}"))),
-                };
+                handles.push(tokio::spawn(async move {
+                    let _permit = match sem.acquire().await {
+                        Ok(p) => p,
+                        Err(e) => return (url, Err(anyhow::anyhow!("Semaphore error: {e}"))),
+                    };
 
-                let cache_key = ContentCache::key(&url, true, max_len);
-                if let Some(cached) = cache.get(&cache_key).await {
-                    return (url, Ok(format!("# {}\n\n{}", cached.title, cached.content)));
+                    let cache_key = ContentCache::key(&url, true, max_len);
+                    if let Some(cached) = cache.get(&cache_key).await {
+                        return (url, Ok(format!("# {}\n\n{}", cached.title, cached.content)));
+                    }
+
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        fetch_and_extract(&bm, &url, max_len, &cache),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("Page read timeout after 30s")))
+                    .map(|ex| format!("# {}\n\n{}", ex.title, ex.content));
+
+                    (url, result)
+                }));
+            }
+
+            let total = urls.len();
+            let results = match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                futures::future::join_all(&mut handles),
+            ).await {
+                Ok(r) => r,
+                Err(_) => {
+                    for h in handles {
+                        h.abort();
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    return Ok(CallToolResult::success(vec![Content::text(format!(
+                        "batch_read timed out after 60s ({} URLs)", total
+                    ))]));
                 }
+            };
 
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    fetch_and_extract(&bm, &url, max_len, &cache),
-                )
-                .await
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("Page read timeout after 30s")))
-                .map(|ex| format!("# {}\n\n{}", ex.title, ex.content));
-
-                (url, result)
-            }));
-        }
-
-        let total = urls.len();
-        let results = match tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            futures::future::join_all(&mut handles),
-        ).await {
-            Ok(r) => r,
-            Err(_) => {
-                for h in handles {
-                    h.abort();
+            let mut successes = vec![];
+            let mut errors = vec![];
+            for result in results {
+                match result {
+                    Ok((url, Ok(content))) => successes.push((url, content)),
+                    Ok((url, Err(e))) => errors.push((url, format!("{:#}", e))),
+                    Err(e) => errors.push(("unknown".to_string(), format!("Task panic: {e}"))),
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                return Ok(CallToolResult::success(vec![Content::text(format!(
-                    "batch_read timed out after 60s ({} URLs)", total
-                ))]));
             }
-        };
 
-        let mut successes = vec![];
-        let mut errors = vec![];
-        for result in results {
-            match result {
-                Ok((url, Ok(content))) => successes.push((url, content)),
-                Ok((url, Err(e))) => errors.push((url, format!("{:#}", e))),
-                Err(e) => errors.push(("unknown".to_string(), format!("Task panic: {e}"))),
+            let mut output = format!("## Successfully read {}/{} pages\n\n", successes.len(), total);
+            for (i, (url, content)) in successes.iter().enumerate() {
+                output.push_str(&format!("### [{}] {} \n\n{}\n\n---\n\n", i + 1, url, content));
             }
-        }
-
-        let mut output = format!("## Successfully read {}/{} pages\n\n", successes.len(), total);
-        for (i, (url, content)) in successes.iter().enumerate() {
-            output.push_str(&format!("### [{}] {} \n\n{}\n\n---\n\n", i + 1, url, content));
-        }
-        if !errors.is_empty() {
-            output.push_str(&format!("## Errors ({})\n\n", errors.len()));
-            for (url, err) in &errors {
-                output.push_str(&format!("- {}: {}\n", url, err));
+            if !errors.is_empty() {
+                output.push_str(&format!("## Errors ({})\n\n", errors.len()));
+                for (url, err) in &errors {
+                    output.push_str(&format!("- {}: {}\n", url, err));
+                }
             }
-        }
 
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+            Ok(CallToolResult::success(vec![Content::text(output)]))
+        }).await
     }
 
     #[tool(description = "RECOMMENDED: Search the web and automatically read the top results in one call. Returns both search result list and extracted page content. Use this as your primary research tool — it replaces the need for separate web_search + read_page calls.")]
@@ -389,154 +466,160 @@ impl SearchServer {
         if query.is_empty() || query.chars().count() > 500 {
             return Err(to_mcp_error("Query must be 1-500 characters"));
         }
-        let search_count = params.search_count.clamp(1, 20);
-        let max_length_per_page = params.max_length_per_page.clamp(1, 15000);
+        let this = self.clone();
+        with_hard_timeout(std::time::Duration::from_secs(90), "search_and_read", async move {
+            let search_count = params.search_count.clamp(1, 20);
+            let max_length_per_page = params.max_length_per_page.clamp(1, 15000);
 
-        let bm = self.browser().await?;
-        let rl = self.rate_limiter(&bm).await;
-        rl.wait().await;
+            let bm = this.get_browser().await?;
+            let rl = this.rate_limiter(&bm).await;
+            rl.wait().await;
 
-        let engine = select_engine(
-            &params.engine,
-            bm.mode(),
-            &self.default_engine,
-            self.region,
-        );
-
-        let tab = bm.tab_pool().acquire().await.map_err(to_mcp_error)?;
-        let search_result = async {
-            search_with_fallback(
-                engine,
+            let engine = select_engine(
+                &params.engine,
                 bm.mode(),
-                tab.page(),
-                &query,
-                search_count,
-                self.region,
-            ).await
-        }.await;
-        tab.close().await;
+                &this.default_engine,
+                this.region,
+            );
 
-        let search_cdp_check: Result<(), ErrorData> = search_result
-            .as_ref()
-            .map(|_| ())
-            .map_err(|e| to_mcp_error(e.to_string()));
-        self.check_cdp_error(&search_cdp_check, &bm);
-
-        if search_result.is_err() {
-            rl.backoff().await;
-        } else {
-            rl.reset_penalty().await;
-        }
-
-        let (engine_name, search_results) = search_result.map_err(to_mcp_error)?;
-
-        let read_count = params.read_count.clamp(1, 5).min(search_results.len());
-        let mut skipped_urls = vec![];
-        let urls_to_read: Vec<String> = search_results
-            .iter()
-            .take(read_count)
-            .filter(|r| {
-                if interaction::validate_url(&r.url, self.allow_private_urls).is_ok() {
-                    true
-                } else {
-                    tracing::debug!(url = %r.url, "Skipping invalid URL in search_and_read");
-                    skipped_urls.push(r.url.clone());
-                    false
-                }
-            })
-            .map(|r| r.url.clone())
-            .collect();
-
-        let bm = bm.clone();
-        let read_semaphore = Arc::new(tokio::sync::Semaphore::new(
-            read_count.min(bm.tab_pool().max_tabs()),
-        ));
-        let mut handles = vec![];
-        for url in urls_to_read.iter() {
-            let sem = read_semaphore.clone();
-            let url = url.clone();
-            let bm = bm.clone();
-            let cache = self.cache.clone();
-            let max_len = max_length_per_page;
-
-            handles.push(tokio::spawn(async move {
-                let _permit = match sem.acquire().await {
-                    Ok(p) => p,
-                    Err(e) => return (url, Err::<String, anyhow::Error>(anyhow::anyhow!("Semaphore error: {e}"))),
-                };
-
-                let cache_key = ContentCache::key(&url, true, max_len);
-                if let Some(cached) = cache.get(&cache_key).await {
-                    return (url, Ok::<String, anyhow::Error>(cached.content));
-                }
-
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    fetch_and_extract(&bm, &url, max_len, &cache),
-                )
+            let tab = tokio::time::timeout(TAB_ACQUIRE_TIMEOUT, bm.tab_pool().acquire())
                 .await
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("Page read timeout after 30s")))
-                .map(|ex| ex.content);
+                .map_err(|_| to_mcp_error(format!("Tab acquire timed out ({}s)", TAB_ACQUIRE_TIMEOUT.as_secs())))?
+                .map_err(to_mcp_error)?;
+            let search_result = async {
+                search_with_fallback(
+                    engine,
+                    bm.mode(),
+                    tab.page(),
+                    &query,
+                    search_count,
+                    this.region,
+                ).await
+            }.await;
+            tab.close().await;
 
-                (url, result)
-            }));
-        }
+            let search_cdp_check: Result<(), ErrorData> = search_result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|e| to_mcp_error(e.to_string()));
+            this.check_cdp_error(&search_cdp_check, &bm);
 
-        let (read_results, read_timed_out) = match tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            futures::future::join_all(&mut handles),
-        ).await {
-            Ok(r) => (r, false),
-            Err(_) => {
-                for h in &handles { h.abort(); }
-                (vec![], true)
+            if search_result.is_err() {
+                rl.backoff().await;
+            } else {
+                rl.reset_penalty().await;
             }
-        };
 
-        let mut read_content: HashMap<String, String> = HashMap::new();
-        let mut read_errors: Vec<(String, String)> = Vec::new();
-        for result in read_results {
-            match result {
-                Ok((url, Ok(content))) => { read_content.insert(url, content); }
-                Ok((url, Err(e))) => { read_errors.push((url, format!("{:#}", e))); }
-                Err(e) => { read_errors.push(("unknown".to_string(), format!("Task error: {e}"))); }
+            let (engine_name, search_results) = search_result.map_err(to_mcp_error)?;
+
+            let read_count = params.read_count.clamp(1, 5).min(search_results.len());
+            let mut skipped_urls = vec![];
+            let urls_to_read: Vec<String> = search_results
+                .iter()
+                .take(read_count)
+                .filter(|r| {
+                    if interaction::validate_url(&r.url, this.allow_private_urls).is_ok() {
+                        true
+                    } else {
+                        tracing::debug!(url = %r.url, "Skipping invalid URL in search_and_read");
+                        skipped_urls.push(r.url.clone());
+                        false
+                    }
+                })
+                .map(|r| r.url.clone())
+                .collect();
+
+            let bm = bm.clone();
+            let read_semaphore = Arc::new(tokio::sync::Semaphore::new(
+                read_count.min(bm.tab_pool().max_tabs()),
+            ));
+            let mut handles = vec![];
+            for url in urls_to_read.iter() {
+                let sem = read_semaphore.clone();
+                let url = url.clone();
+                let bm = bm.clone();
+                let cache = this.cache.clone();
+                let max_len = max_length_per_page;
+
+                handles.push(tokio::spawn(async move {
+                    let _permit = match sem.acquire().await {
+                        Ok(p) => p,
+                        Err(e) => return (url, Err::<String, anyhow::Error>(anyhow::anyhow!("Semaphore error: {e}"))),
+                    };
+
+                    let cache_key = ContentCache::key(&url, true, max_len);
+                    if let Some(cached) = cache.get(&cache_key).await {
+                        return (url, Ok::<String, anyhow::Error>(cached.content));
+                    }
+
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        fetch_and_extract(&bm, &url, max_len, &cache),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("Page read timeout after 30s")))
+                    .map(|ex| ex.content);
+
+                    (url, result)
+                }));
             }
-        }
 
-        let mut output = format!("## Search results for \"{}\" (via {})\n\n", query, engine_name);
-        for (i, r) in search_results.iter().enumerate() {
-            let read_marker = if read_content.contains_key(&r.url) { " ⭐ read" } else { "" };
-            output.push_str(&format!("{}. [{}]({}){}\n   {}\n\n", i + 1, r.title, r.url, read_marker, r.snippet));
-        }
+            let (read_results, read_timed_out) = match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                futures::future::join_all(&mut handles),
+            ).await {
+                Ok(r) => (r, false),
+                Err(_) => {
+                    for h in &handles { h.abort(); }
+                    (vec![], true)
+                }
+            };
 
-        if !read_content.is_empty() {
-            output.push_str("---\n\n## Full content\n\n");
-            for (i, r) in search_results.iter().take(read_count).enumerate() {
-                if let Some(content) = read_content.get(&r.url) {
-                    output.push_str(&format!("### [{}] {}\nSource: {}\n\n{}\n\n---\n\n", i + 1, r.title, r.url, content));
+            let mut read_content: HashMap<String, String> = HashMap::new();
+            let mut read_errors: Vec<(String, String)> = Vec::new();
+            for result in read_results {
+                match result {
+                    Ok((url, Ok(content))) => { read_content.insert(url, content); }
+                    Ok((url, Err(e))) => { read_errors.push((url, format!("{:#}", e))); }
+                    Err(e) => { read_errors.push(("unknown".to_string(), format!("Task error: {e}"))); }
                 }
             }
-        }
 
-        if !read_errors.is_empty() {
-            output.push_str(&format!("\n## Read Errors ({})\n\n", read_errors.len()));
-            for (url, err) in &read_errors {
-                output.push_str(&format!("- {}: {}\n", url, err));
+            let mut output = format!("## Search results for \"{}\" (via {})\n\n", query, engine_name);
+            for (i, r) in search_results.iter().enumerate() {
+                let read_marker = if read_content.contains_key(&r.url) { " ⭐ read" } else { "" };
+                output.push_str(&format!("{}. [{}]({}){}\n   {}\n\n", i + 1, r.title, r.url, read_marker, r.snippet));
             }
-        }
 
-        if !skipped_urls.is_empty() {
-            output.push_str(&format!("\n## Skipped URLs ({})\n\n", skipped_urls.len()));
-            for url in &skipped_urls {
-                output.push_str(&format!("- {}: invalid or private URL\n", url));
+            if !read_content.is_empty() {
+                output.push_str("---\n\n## Full content\n\n");
+                for (i, r) in search_results.iter().take(read_count).enumerate() {
+                    if let Some(content) = read_content.get(&r.url) {
+                        output.push_str(&format!("### [{}] {}\nSource: {}\n\n{}\n\n---\n\n", i + 1, r.title, r.url, content));
+                    }
+                }
             }
-        }
 
-        if read_timed_out {
-            output.push_str("\n> ⚠️ Page reading timed out after 60s. Some results may be missing.\n");
-        }
+            if !read_errors.is_empty() {
+                output.push_str(&format!("\n## Read Errors ({})\n\n", read_errors.len()));
+                for (url, err) in &read_errors {
+                    output.push_str(&format!("- {}: {}\n", url, err));
+                }
+            }
 
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+            if !skipped_urls.is_empty() {
+                output.push_str(&format!("\n## Skipped URLs ({})\n\n", skipped_urls.len()));
+                for url in &skipped_urls {
+                    output.push_str(&format!("- {}: invalid or private URL\n", url));
+                }
+            }
+
+            if read_timed_out {
+                output.push_str("\n> ⚠️ Page reading timed out after 60s. Some results may be missing.\n");
+            }
+
+            Ok(CallToolResult::success(vec![Content::text(output)]))
+        }).await
     }
 
     #[tool(description = "Take a screenshot of a webpage. Only use when visual content is specifically needed — prefer read_page for text content as it is far more token-efficient.")]
@@ -549,46 +632,63 @@ impl SearchServer {
             interaction::validate_file_path(path).map_err(to_mcp_error)?;
         }
 
-        let bm = self.browser().await?;
-        let tab = bm.tab_pool().acquire().await.map_err(to_mcp_error)?;
-        let file_path = params.file_path.clone();
-        let format_str = params.format.clone();
+        let this = self.clone();
+        with_hard_timeout(std::time::Duration::from_secs(30), "screenshot", async move {
+            let bm = this.get_browser().await?;
+            let tab = tokio::time::timeout(TAB_ACQUIRE_TIMEOUT, bm.tab_pool().acquire())
+                .await
+                .map_err(|_| to_mcp_error(format!("Tab acquire timed out ({}s)", TAB_ACQUIRE_TIMEOUT.as_secs())))?
+                .map_err(to_mcp_error)?;
+            let file_path = params.file_path.clone();
+            let format_str = params.format.clone();
 
-        let result = async {
-            interaction::navigate(tab.page(), &params.url, 15).await.map_err(to_mcp_error)?;
+            let cdp_work = async {
+                interaction::navigate(tab.page(), &params.url, 15).await.map_err(to_mcp_error)?;
 
-            let data = match format_str.as_str() {
-                "jpeg" | "jpg" => {
-                    tab.page().screenshot_jpeg(85).await
-                        .map_err(|e| to_mcp_error(format!("Screenshot failed: {}", e)))?
+                let data = match format_str.as_str() {
+                    "jpeg" | "jpg" => {
+                        tab.page().screenshot_jpeg(85).await
+                            .map_err(|e| to_mcp_error(format!("Screenshot failed: {}", e)))?
+                    }
+                    _ => {
+                        tab.page().screenshot().await
+                            .map_err(|e| to_mcp_error(format!("Screenshot failed: {}", e)))?
+                    }
+                };
+                Ok::<Vec<u8>, ErrorData>(data)
+            };
+
+            let timed_result = tokio::time::timeout(FETCH_HARD_TIMEOUT, cdp_work).await;
+            tab.close().await;
+
+            let data = match timed_result {
+                Ok(inner) => {
+                    this.check_cdp_error(&inner, &bm);
+                    inner?
                 }
-                _ => {
-                    tab.page().screenshot().await
-                        .map_err(|e| to_mcp_error(format!("Screenshot failed: {}", e)))?
+                Err(_) => {
+                    tracing::error!(url = %params.url, "screenshot hard timeout");
+                    bm.mark_unhealthy();
+                    return Err(to_mcp_error("Screenshot timed out. Browser connection may be lost."));
                 }
             };
-            Ok::<Vec<u8>, ErrorData>(data)
-        }.await;
 
-        tab.close().await;
-        self.check_cdp_error(&result, &bm);
-        let data = result?;
-
-        if let Some(ref path) = file_path {
-            std::fs::write(path, &data)
-                .map_err(|e| to_mcp_error(format!("Failed to write file: {e}")))?;
-            Ok(CallToolResult::success(vec![Content::text(format!(
-                "Screenshot saved to {} ({} bytes)", path, data.len()
-            ))]))
-        } else {
-            use base64::Engine as _;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-            let mime = match format_str.as_str() {
-                "jpeg" | "jpg" => "image/jpeg",
-                _ => "image/png",
-            };
-            Ok(CallToolResult::success(vec![Content::image(b64, mime)]))
-        }
+            if let Some(ref path) = file_path {
+                std::fs::write(path, &data)
+                    .map_err(|e| to_mcp_error(format!("Failed to write file: {e}")))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Screenshot saved to {} ({} bytes)", path, data.len()
+                ))]))
+            } else {
+                use base64::Engine as _;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                let mime = match format_str.as_str() {
+                    "jpeg" | "jpg" => "image/jpeg",
+                    _ => "image/png",
+                };
+                Ok(CallToolResult::success(vec![Content::image(b64, mime)]))
+            }
+        }).await
     }
 
     #[tool(description = "Detect and click OAuth/SSO authorization flows (SSO buttons, consent pages, SAML, popups, multi-step redirects). \
@@ -600,8 +700,31 @@ impl SearchServer {
         &self,
         Parameters(params): Parameters<tools::ClickAuthorizeParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let bm = self.browser().await?;
-        authorize::handle_click_authorize(bm, params, self.allow_private_urls).await
+        let this = self.clone();
+        let hard_timeout = std::time::Duration::from_secs(params.timeout + 15);
+        with_hard_timeout(hard_timeout, "click_authorize", async move {
+            let bm = this.get_browser().await?;
+            authorize::handle_click_authorize(bm, params, this.allow_private_urls).await
+        }).await
+    }
+
+    #[tool(description = "General-purpose popup/new-tab handler. Use when a page action opens a new tab that needs interaction. \
+        THREE modes: (1) Auth popups — auto-detects Google account chooser, OAuth consent, SAML and handles them (use preferred_account to pick a specific Google account). \
+        (2) Non-auth popups — use popup_click to click a specific button/element in the popup (e.g. confirm dialogs, consent buttons). \
+        (3) Observe — omit popup_click to just detect the popup and return its content preview. \
+        When to use handle_popup vs click_authorize: use click_authorize for full SSO flows (one call does detect → click SSO button → handle popup → return). \
+        Use handle_popup when you need fine-grained control: custom trigger element, specific account selection, or non-auth popup interaction. \
+        Does NOT handle: browser-native FedCM dialogs, username/password forms, CAPTCHA.")]
+    async fn handle_popup(
+        &self,
+        Parameters(params): Parameters<tools::HandlePopupParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let this = self.clone();
+        let hard_timeout = std::time::Duration::from_secs(params.timeout + 15);
+        with_hard_timeout(hard_timeout, "handle_popup", async move {
+            let bm = this.get_browser().await?;
+            popup_handler::handle_popup(bm, params, this.allow_private_urls).await
+        }).await
     }
 
     #[tool(description = "Sync login state (cookies, sessions) from user's main Chrome to the debug profile. \
@@ -651,9 +774,13 @@ impl ServerHandler for SearchServer {
                 4. batch_read — read multiple known URLs concurrently (up to 10).\n\
                 5. screenshot — visual capture only; prefer read_page for text.\n\
                 6. click_authorize — handle OAuth/SSO flows (SSO buttons, consent pages, SAML, popups, multi-step redirects). \
-                Use when read_page fails on OAuth/SSO pages. Returning Google users: FedCM auto-reauthn may complete after tool triggers the flow. \
+                Use when read_page fails on OAuth/SSO pages. Supports preferred_account param to select a specific Google account. \
+                Returning Google users: FedCM auto-reauthn may complete after tool triggers the flow. \
                 Limitation: cannot handle first-time Google FedCM account picker (CDP) — user must manually authorize Google once in Chrome first.\n\
-                7. sync_login — refresh login state from user's Chrome when pages return [READ_FAILED] due to expired cookies/sessions. \
+                7. handle_popup — general-purpose popup/new-tab handler. Three modes: auth auto-handle, non-auth click (popup_click), \
+                or observe-only. Use when you need control over popup interaction (custom trigger, specific account, non-auth popups). \
+                For full SSO automation prefer click_authorize.\n\
+                8. sync_login — refresh login state from user's Chrome when pages return [READ_FAILED] due to expired cookies/sessions. \
                 UserChrome mode only (not needed in AutoConnect). Cannot sync Google OAuth sessions (Chrome cookie encryption).\n\
                 \n\
                 QUERY CRAFTING:\n\

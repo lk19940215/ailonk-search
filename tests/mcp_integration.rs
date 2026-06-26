@@ -25,6 +25,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "search_and_read",
     "screenshot",
     "click_authorize",
+    "handle_popup",
     "sync_login",
 ];
 
