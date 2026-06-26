@@ -140,13 +140,14 @@ pub async fn interact_with_auth_page(
     }
 }
 
-#[allow(dead_code)]
 pub struct AuthPopupOutcome {
     pub success: bool,
     pub auth_type: AuthPageType,
     pub popup_url: String,
     pub message: String,
+    #[allow(dead_code)]
     pub closed: bool,
+    #[allow(dead_code)]
     pub accounts: Vec<String>,
 }
 
@@ -164,7 +165,7 @@ pub async fn handle_auth_popup(
     let popup_url = prepare_popup_page(&popup_page).await;
 
     let popup_auth = auth::detect_auth_page(&popup_page).await;
-    tracing::info!(
+    tracing::debug!(
         popup_url = %popup_url, auth_type = %popup_auth,
         "Popup auth detected"
     );

@@ -96,23 +96,22 @@ impl TargetWatcher {
                     } else if let Some(ref filter) = self.filter {
                         // With filter: prefer matching tabs
                         if let Some(tab) = new_tabs.iter().find(|t| filter.matches(t)) {
-                            tracing::info!(
+                            tracing::debug!(
                                 target_id = %tab.id, url = %tab.url,
                                 "New target detected (filtered)"
                             );
                             return Some((*tab).clone());
                         }
                     } else {
-                        // Without filter: prefer non-blank tabs, then about:blank as fallback
                         if let Some(tab) = new_tabs.iter().find(|t| !t.url.is_empty() && t.url != "about:blank") {
-                            tracing::info!(
+                            tracing::debug!(
                                 target_id = %tab.id, url = %tab.url,
                                 "New target detected"
                             );
                             return Some((*tab).clone());
                         }
                         if let Some(tab) = new_tabs.first() {
-                            tracing::info!(
+                            tracing::debug!(
                                 target_id = %tab.id, url = %tab.url,
                                 "New target detected (about:blank, will settle later)"
                             );

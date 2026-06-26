@@ -141,6 +141,12 @@ pub struct BrowserManager {
 }
 
 impl BrowserManager {
+    fn live_config(cdp_timeout: u64) -> StealthConfig {
+        let mut config = StealthConfig::live();
+        config.cdp_timeout = cdp_timeout;
+        config
+    }
+
     /// Spawn-isolated WebSocket connect: runs eoka's blocking connect on a dedicated
     /// blocking thread pool (`spawn_blocking`) so leaked connections never starve
     /// the async runtime — rmcp can always write responses to stdout.
@@ -204,10 +210,7 @@ impl BrowserManager {
     async fn try_cached_connect(ws_url: &str, max_tabs: usize) -> Option<Self> {
         tracing::info!("Attempting reconnect via cached WS URL...");
 
-        let mut config = StealthConfig::live();
-        config.cdp_timeout = 5;
-
-        match Self::spawn_connect(ws_url, config, 5).await {
+        match Self::spawn_connect(ws_url, Self::live_config(5), 5).await {
             Ok(browser) => {
                 tracing::info!("Reconnected via cached WS URL");
                 Some(Self::from_browser(browser, ConnectionMode::UserChrome, max_tabs, None, Some(ws_url.to_string())))
@@ -222,9 +225,7 @@ impl BrowserManager {
     /// Fast probe: try connecting to an existing debug Chrome on a known port.
     async fn try_debug_port_connect(port: u16, max_tabs: usize) -> Option<Self> {
         let ws_url = wait_for_debug_port(port, 1).await.ok()?;
-        let mut config = StealthConfig::live();
-        config.cdp_timeout = 5;
-        let browser = Self::spawn_connect(&ws_url, config, 15).await.ok()?;
+        let browser = Self::spawn_connect(&ws_url, Self::live_config(5), 15).await.ok()?;
         tracing::info!(port, "Connected via debug port (fast probe)");
         Some(Self::from_browser(browser, ConnectionMode::UserChrome, max_tabs, None, Some(ws_url)))
     }
@@ -264,10 +265,7 @@ impl BrowserManager {
             let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
             tracing::info!(browser = name, port, "Found DevToolsActivePort, attempting auto-connect...");
 
-            let mut config = StealthConfig::live();
-            config.cdp_timeout = 5;
-
-            match Self::spawn_connect(&ws_url, config, 15).await {
+            match Self::spawn_connect(&ws_url, Self::live_config(5), 15).await {
                 Ok(browser) => {
                     tracing::info!("Auto-connected to {} via DevToolsActivePort (port {})", name, port);
                     return Some(Self::from_browser(browser, ConnectionMode::UserChrome, args.max_tabs, None, Some(ws_url)));
@@ -312,9 +310,7 @@ impl BrowserManager {
     }
 
     async fn connect_remote(url: &str, max_tabs: usize) -> anyhow::Result<Self> {
-        let mut config = StealthConfig::live();
-        config.cdp_timeout = 10;
-        let browser = Self::spawn_connect(url, config, 10).await
+        let browser = Self::spawn_connect(url, Self::live_config(10), 10).await
             .map_err(|e| anyhow::anyhow!("Failed to connect to Chrome at {}: {}", url, e))?;
         tracing::info!("Connected to existing Chrome at {}", url);
         Ok(Self::from_browser(browser, ConnectionMode::UserChrome, max_tabs, None, None))
@@ -325,23 +321,21 @@ impl BrowserManager {
 
         if !profile_dir.exists() {
             tracing::warn!(
-                "Profile 目录不存在: {}. 将使用 headless 模式。\n\
-                运行 `ailonk-search setup` 创建 profile。",
+                "Profile directory does not exist: {}. Falling back to headless mode. \
+                Run `ailonk-search setup` to create profile.",
                 profile_dir.display()
             );
             return Self::launch_headless(args).await;
         }
 
         let chrome_path = find_chrome_path(&args.chrome_path)
-            .ok_or_else(|| anyhow::anyhow!("未找到 Chrome，请使用 --chrome-path 指定"))?;
+            .ok_or_else(|| anyhow::anyhow!("Chrome not found. Specify path with --chrome-path"))?;
 
         let port = DEBUG_PORT;
 
         if let Ok(ws_url) = wait_for_debug_port(port, 1).await {
             tracing::info!("Detected existing Chrome on port {}, connecting...", port);
-            let mut config = StealthConfig::live();
-            config.cdp_timeout = 10;
-            match Self::spawn_connect(&ws_url, config, 10).await {
+            match Self::spawn_connect(&ws_url, Self::live_config(10), 10).await {
                 Ok(browser) => {
                     return Ok(Self::from_browser(browser, ConnectionMode::UserChrome, args.max_tabs, None, Some(ws_url)));
                 }
@@ -390,15 +384,14 @@ impl BrowserManager {
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(anyhow::anyhow!("Chrome 启动超时 (port {}): {}", port, e));
+                tracing::error!(port, error = %e, "Chrome launch timed out");
+                return Err(anyhow::anyhow!("Chrome launch timed out (port {}): {}", port, e));
             }
         };
 
         tracing::info!(ws_url = %ws_url, "Chrome ready, connecting via WebSocket...");
 
-        let mut config = StealthConfig::live();
-        config.cdp_timeout = 10;
-        let browser = match Self::spawn_connect(ws_url.trim(), config, 10).await {
+        let browser = match Self::spawn_connect(ws_url.trim(), Self::live_config(10), 10).await {
             Ok(browser) => browser,
             Err(e) => {
                 let _ = child.kill();

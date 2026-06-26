@@ -125,6 +125,7 @@ async fn sso_loop(
 
     loop {
         if tokio::time::Instant::now() > global_deadline {
+            tracing::warn!(timeout, last_event = %last_event, step, "SSO loop timed out");
             let final_url = page.url().await.unwrap_or_default();
             return Ok(interaction::auth::AuthResult {
                 success: false,
@@ -141,7 +142,7 @@ async fn sso_loop(
         let page_auth =
             interaction::auth::detect_auth_page_with_target(page, Some(target_url)).await;
         step += 1;
-        tracing::info!(step, url = %page_url, auth = %page_auth, "SSO step");
+        tracing::debug!(step, url = %page_url, auth = %page_auth, "SSO step");
 
         match page_auth {
             interaction::auth::AuthPageType::NotAuth => {
@@ -159,7 +160,7 @@ async fn sso_loop(
                 });
             }
             ref auth if auth.needs_interactive_handler() => {
-                tracing::info!(auth = %auth, step, "Interactive auth on main page");
+                tracing::debug!(auth = %auth, step, "Interactive auth on main page");
                 let result = interaction::auth::click_authorize_with_account(
                     page, auth, preferred_account,
                 )
@@ -176,7 +177,7 @@ async fn sso_loop(
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
                 let clicked = interaction::auth::try_sso_click(page).await;
-                tracing::info!(clicked, step, "SSO button click");
+                tracing::debug!(clicked, step, "SSO button click");
 
                 if !clicked {
                     click_failures += 1;
@@ -321,6 +322,7 @@ fn format_auth_result(
             Ok(CallToolResult::success(vec![Content::text(msg)]))
         }
         Err(e) => {
+            tracing::error!(error = %e, "Authorization flow failed");
             if is_fatal_cdp_error_anyhow(&e) {
                 bm.mark_unhealthy();
             }

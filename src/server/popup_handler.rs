@@ -45,7 +45,7 @@ async fn handle_popup_inner(
         tracing::info!(
             url = %params.url, trigger = ?params.trigger,
             popup_url_contains = ?params.popup_url_contains,
-            preferred_account = ?params.preferred_account,
+            has_preferred_account = params.preferred_account.is_some(),
             popup_click = ?params.popup_click,
             timeout, "handle_popup started"
         );
@@ -91,14 +91,13 @@ async fn handle_popup_inner(
             }
         };
 
-        tracing::info!(popup_id = %popup.id, popup_url = %popup.url, "Popup detected");
+        tracing::debug!(popup_id = %popup.id, popup_url = %popup.url, "Popup detected");
 
-        // Phase 3: Attach + interact
         let popup_page = watcher.attach(&popup.id).await?;
         let popup_url = popup_flow::prepare_popup_page(&popup_page).await;
         let popup_auth_type = interaction::auth::detect_auth_page(&popup_page).await;
 
-        tracing::info!(popup_url = %popup_url, auth_type = %popup_auth_type, "Popup analyzed");
+        tracing::info!(popup_url = %popup_url, auth_type = %popup_auth_type, "Popup attached and analyzed");
 
         let preferred = params.preferred_account.as_deref();
         let popup_type_str = popup_auth_type.to_string();
@@ -133,7 +132,7 @@ async fn handle_popup_inner(
             interaction_success
         };
 
-        tracing::info!(
+        tracing::debug!(
             interaction_success, closed, is_auth, effective_success,
             final_url = %final_url, popup_type = %popup_type_str,
             "handle_popup completed"
@@ -155,6 +154,7 @@ async fn handle_popup_inner(
     match result {
         Ok(pr) => Ok(format_popup_result(pr)),
         Err(e) => {
+            tracing::error!(error = %e, "Popup handling failed");
             if is_fatal_cdp_error_anyhow(&e) {
                 bm.mark_unhealthy();
             }
