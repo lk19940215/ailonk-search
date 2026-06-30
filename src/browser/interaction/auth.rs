@@ -1,6 +1,7 @@
 use eoka::Page;
 use super::signals::{AUTH_URL_PATTERNS, AUTH_CONSENT_BUTTON_TEXTS, SSO_URL_PATTERNS, SSO_REDIRECT_PARAMS, SSO_CONTENT_SIGNALS, AUTH_BUTTON_KEYWORDS};
 
+
 #[derive(Debug, Clone)]
 pub enum AuthPageType {
     GoogleOAuthConsent,
@@ -10,6 +11,8 @@ pub enum AuthPageType {
     CustomSso,
     /// Any page with a detectable login/SSO button that doesn't match specific patterns
     GenericLogin,
+    /// A page with username/password credential form (cannot be automated via click)
+    CredentialLogin,
     NotAuth,
 }
 
@@ -39,6 +42,7 @@ impl AuthPageType {
     pub fn has_account_list(&self) -> bool {
         matches!(self, Self::GoogleAccountSelection)
     }
+
 }
 
 impl std::fmt::Display for AuthPageType {
@@ -50,6 +54,7 @@ impl std::fmt::Display for AuthPageType {
             Self::GenericOAuth => write!(f, "generic_oauth"),
             Self::CustomSso => write!(f, "custom_sso"),
             Self::GenericLogin => write!(f, "generic_login"),
+            Self::CredentialLogin => write!(f, "credential_login"),
             Self::NotAuth => write!(f, "not_auth"),
         }
     }
@@ -65,8 +70,9 @@ pub struct AuthResult {
 
 /// Detect if the current page is an authorization/login page.
 /// Checks URL patterns first (fast path), then falls back to page content analysis.
-/// `target_url` is the originally requested URL; if current URL differs from it,
-/// generic login button detection is enabled (avoids false positives on content pages).
+/// `target_url` is the originally requested URL; content-based SSO signals (Google
+/// widgets, etc.) are only checked when redirected away from target to avoid false
+/// positives, but button/credential detection runs unconditionally.
 pub async fn detect_auth_page(page: &Page) -> AuthPageType {
     detect_auth_page_with_target(page, None).await
 }
@@ -105,9 +111,6 @@ pub async fn detect_auth_page_with_target(page: &Page, target_url: Option<&str>)
         return AuthPageType::CustomSso;
     }
 
-    // If we're already at the target URL, skip content-based heuristics.
-    // Pages at the target may contain Google widgets, "sign in" text, etc.
-    // that would cause false positives.
     let at_target = match target_url {
         Some(target) => {
             let current = url.trim_end_matches('/');
@@ -118,6 +121,8 @@ pub async fn detect_auth_page_with_target(page: &Page, target_url: Option<&str>)
         None => false,
     };
 
+    // Content-based SSO signals: skip when at target to avoid false positives
+    // from Google widgets, embedded sign-in text, etc.
     if !at_target {
         if let Ok(text) = page.text().await {
             let text_lower = text.to_lowercase();
@@ -137,11 +142,18 @@ pub async fn detect_auth_page_with_target(page: &Page, target_url: Option<&str>)
         }
     }
 
-    let was_redirected = !at_target;
-    if was_redirected {
-        if detect_auth_button(page).await.is_some() {
-            return AuthPageType::GenericLogin;
-        }
+    // Auth button detection: always try clicking a login button first.
+    // The redirect destination determines the actual auth type (SSO vs credentials),
+    // not the presence of password fields on the current page — many pages (e.g. CICD)
+    // show credential forms alongside SSO buttons that redirect to external SSO providers.
+    if detect_auth_button(page).await.is_some() {
+        return AuthPageType::GenericLogin;
+    }
+
+    // No clickable auth button — check for credential form as last resort.
+    // Only on redirected pages (not at target) to avoid false positives on content pages.
+    if !at_target && detect_credential_form(page, false).await {
+        return AuthPageType::CredentialLogin;
     }
 
     AuthPageType::NotAuth
@@ -209,8 +221,8 @@ fn build_auth_button_score_js(should_click: bool) -> String {
 }
 
 /// Detect if the page has any clickable element with auth/login keywords.
-/// Returns the best candidate's text if found. Used for generic login detection.
-/// Should only be called when URL-based redirect detection suggests this is a login page.
+/// Returns the best candidate's text if found. Runs unconditionally (both at target
+/// and after redirect) to catch SSO buttons on landing pages.
 pub async fn detect_auth_button(page: &Page) -> Option<String> {
     let js_final = build_auth_button_score_js(false);
 
@@ -221,6 +233,32 @@ pub async fn detect_auth_button(page: &Page) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Detect if the page has a credential-based login form.
+/// When `strict=true` (at target URL), requires a **visible** password input with nearby
+/// username field to avoid false positives on settings/registration pages.
+/// When `strict=false` (redirected page), any password input with a nearby username field
+/// counts — handles SPA tab switching where fields may be in hidden tabs.
+pub async fn detect_credential_form(page: &Page, strict: bool) -> bool {
+    let js = format!(r#"((strict) => {{
+        const pwdInputs = document.querySelectorAll('input[type="password"]');
+        if (pwdInputs.length > 2) return false; // password-change form
+        for (const pwd of pwdInputs) {{
+            if (strict) {{
+                const rect = pwd.getBoundingClientRect();
+                if (rect.width < 10 || rect.height < 10) continue;
+                if (pwd.offsetParent === null) continue;
+            }}
+            const scope = pwd.closest('form') || pwd.closest('.el-tabs, .ant-tabs, .tab-content, [class*="login"], [class*="Login"]') || document.body;
+            const hasUsernameField = scope.querySelector(
+                'input[type="text"], input[type="email"], input[name*="user"], input[name*="account"], input[name*="email"], input[placeholder*="账号"], input[placeholder*="邮箱"], input[placeholder*="用户"]'
+            );
+            if (hasUsernameField) return true;
+        }}
+        return false;
+    }})({})"#, if strict { "true" } else { "false" });
+    page.evaluate::<bool>(&js).await.unwrap_or(false)
 }
 
 /// Find and click the best auth/login button on the page using keyword scoring.
@@ -282,6 +320,17 @@ async fn click_authorize_impl(page: &Page, auth_type: &AuthPageType, depth: u8, 
         }
         AuthPageType::GenericLogin => {
             handle_generic_login(page, &initial_url, depth, preferred_account).await
+        }
+        AuthPageType::CredentialLogin => {
+            AuthResult {
+                success: false,
+                auth_type: AuthPageType::CredentialLogin,
+                final_url: initial_url.to_string(),
+                message: "This page requires username/password login (credential form detected). \
+                          click_authorize cannot fill credentials. Use sync_login to sync login \
+                          state from your main Chrome browser, then retry read_page."
+                    .to_string(),
+            }
         }
         AuthPageType::NotAuth => AuthResult {
             success: false,

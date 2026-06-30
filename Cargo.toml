@@ -1,6 +1,6 @@
 [package]
 name = "ailonk-search"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 rust-version = "1.91"
 description = "Chrome CDP-based MCP Server for web search and content extraction"
@@ -48,6 +48,10 @@ url = "2"
 rand = "0.9"
 dirs = "6"
 rs-trafilatura = "0.2.2"
+
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
 [dev-dependencies]
 rmcp = { version = "1.7", features = ["client", "transport-child-process"] }

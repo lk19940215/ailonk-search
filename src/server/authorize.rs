@@ -39,6 +39,10 @@ async fn click_authorize_inner(
         interaction::navigate(tab.page(), &params.url, 15).await?;
         interaction::handle_consent(tab.page(), "").await?;
 
+        // Wait for SPA hydration: login forms, buttons, etc. may render after page load
+        tab.page().wait_for("input, button, form", 3000).await.ok();
+        let _ = tab.page().wait_for_network_idle(500, 5000).await;
+
         let initial_auth = interaction::auth::detect_auth_page_with_target(
             tab.page(),
             Some(&params.url),
@@ -159,6 +163,19 @@ async fn sso_loop(
                     message: format!("Page is not auth but target not reachable. [{}]", last_event),
                 });
             }
+            interaction::auth::AuthPageType::CredentialLogin => {
+                let final_url = page.url().await.unwrap_or_default();
+                tracing::info!(url = %final_url, step, "Credential login page detected in SSO loop");
+                return Ok(interaction::auth::AuthResult {
+                    success: false,
+                    auth_type: interaction::auth::AuthPageType::CredentialLogin,
+                    final_url,
+                    message: "Redirected to credential login page (username/password required). \
+                              click_authorize cannot fill credentials. Use sync_login to sync \
+                              login state from your main Chrome browser, then retry read_page."
+                        .to_string(),
+                });
+            }
             ref auth if auth.needs_interactive_handler() => {
                 tracing::debug!(auth = %auth, step, "Interactive auth on main page");
                 let result = interaction::auth::click_authorize_with_account(
@@ -243,6 +260,23 @@ async fn sso_loop(
                         }
                     }
                     PostClickEvent::Timeout => {
+                        // Post-click credential check: if the button click didn't
+                        // redirect anywhere and the page has a credential form,
+                        // the button was likely a form control, not an SSO entry.
+                        if interaction::auth::detect_credential_form(page, false).await {
+                            let final_url = page.url().await.unwrap_or_default();
+                            tracing::info!(url = %final_url, step, "Credential form detected after click timeout");
+                            return Ok(interaction::auth::AuthResult {
+                                success: false,
+                                auth_type: interaction::auth::AuthPageType::CredentialLogin,
+                                final_url,
+                                message: "Login button clicked but no redirect occurred — page has \
+                                          a credential form (username/password). click_authorize \
+                                          cannot fill credentials. Use sync_login to sync login \
+                                          state from your main Chrome browser, then retry read_page."
+                                    .to_string(),
+                            });
+                        }
                         last_event = String::from("no_response");
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     }
