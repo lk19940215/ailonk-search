@@ -124,6 +124,7 @@ async fn sso_loop(
     let mut step = 0u8;
     let mut last_event = String::from("none");
     let mut click_failures = 0u8;
+    let mut gsi_reloads = 0u8;
     let global_deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(timeout);
 
@@ -239,6 +240,7 @@ async fn sso_loop(
                             popup_id = %popup.id, url = %popup.url,
                             "Popup detected — actively handling"
                         );
+                        let pre_popup_url = page.url().await.unwrap_or_default();
                         match popup_flow::handle_auth_popup(
                             &click_watcher,
                             &popup,
@@ -248,6 +250,18 @@ async fn sso_loop(
                         .await
                         {
                             Ok(outcome) => {
+                                // Wait for opener page to process postMessage callback
+                                // and redirect (e.g., stlogin → CICD after Google SSO).
+                                // Backend token validation can be slow, so allow up to 10s.
+                                for i in 0..10 {
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                    let current = page.url().await.unwrap_or_default();
+                                    if current != pre_popup_url {
+                                        tracing::info!(new_url = %current, wait_secs = i + 1, "Main page redirected after popup");
+                                        break;
+                                    }
+                                }
+                                let _ = page.wait_for_network_idle(500, 8000).await;
                                 last_event = format!(
                                     "popup_active(url={})",
                                     outcome.popup_url.chars().take(60).collect::<String>()
@@ -260,6 +274,25 @@ async fn sso_loop(
                         }
                     }
                     PostClickEvent::Timeout => {
+                        // Google GIS iframe retry: if the page has a broken GIS
+                        // iframe (intermittent 500 renders it at 0x0), reload to
+                        // give Google's endpoint another chance.
+                        let has_broken_gsi = page.evaluate::<bool>(r#"
+                            (() => {
+                                const gsi = document.querySelector('iframe[src*="accounts.google.com/gsi"]');
+                                return gsi !== null && gsi.getBoundingClientRect().width < 5;
+                            })()
+                        "#).await.unwrap_or(false);
+                        if has_broken_gsi && gsi_reloads < 2 {
+                            gsi_reloads += 1;
+                            tracing::info!(step, attempt = gsi_reloads, "Broken Google GIS iframe detected, reloading page");
+                            page.reload().await.ok();
+                            page.wait_for("body", 5000).await.ok();
+                            let _ = page.wait_for_network_idle(500, 8000).await;
+                            last_event = String::from("gsi_reload");
+                            continue;
+                        }
+
                         // Post-click credential check: if the button click didn't
                         // redirect anywhere and the page has a credential form,
                         // the button was likely a form control, not an SSO entry.
